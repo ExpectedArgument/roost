@@ -27,18 +27,13 @@ $ff = Join-Path $cfg 'claude-flags'
 if (-not (Test-Path -LiteralPath $ff)) { Set-Content -LiteralPath $ff -Value '--permission-mode auto' }
 Step "config in $cfg (existing files kept)"
 
-# hooks in ~/.claude/settings.json (existing settings are kept; backup first)
+# hooks in ~/.claude/settings.json (existing settings are kept; backup first; untouched when nothing is missing)
 $sp = Join-Path $env:USERPROFILE '.claude\settings.json'
 New-Item -ItemType Directory -Force -Path (Split-Path $sp) | Out-Null
 $s = @{}
-if (Test-Path -LiteralPath $sp) {
-    $bk = $sp + '.pre-roost-' + (Get-Date -Format yyyyMMdd-HHmmss)
-    Copy-Item -LiteralPath $sp -Destination $bk -Force
-    Step 'settings.json backed up'
-    Note $bk
-    $s = Get-Content -LiteralPath $sp -Raw | ConvertFrom-Json -AsHashtable
-}
-if (-not $s.ContainsKey('hooks')) { $s['hooks'] = @{} }
+if (Test-Path -LiteralPath $sp) { $s = Get-Content -LiteralPath $sp -Raw | ConvertFrom-Json -AsHashtable }
+$changed = $false
+if (-not $s.ContainsKey('hooks')) { $s['hooks'] = @{}; $changed = $true }
 $hk = ($dst -replace '\\', '/') + '/roost-hook.ps1'
 $events = [ordered]@{ SessionStart = 'start'; UserPromptSubmit = 'busy'; Stop = 'idle'; Notification = 'attention'; SessionEnd = 'end' }
 foreach ($ev in $events.Keys) {
@@ -50,11 +45,22 @@ foreach ($ev in $events.Keys) {
     if (-not $has) {
         $timeout = if ($ev -eq 'SessionEnd') { 3 } else { 10 }
         $list += @{ hooks = @(@{ type = 'command'; command = $cmd; timeout = $timeout }) }
+        $changed = $true
     }
     $s['hooks'][$ev] = $list
 }
-$s | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $sp -Encoding utf8
-Step 'Claude Code hooks registered'
+if ($changed) {
+    if (Test-Path -LiteralPath $sp) {
+        $bk = $sp + '.pre-roost-' + (Get-Date -Format yyyyMMdd-HHmmss)
+        Copy-Item -LiteralPath $sp -Destination $bk -Force
+        Step 'settings.json backed up'
+        Note $bk
+    }
+    $s | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $sp -Encoding utf8
+    Step 'Claude Code hooks registered'
+} else {
+    Step 'Claude Code hooks already registered (settings.json unchanged)'
+}
 
 # reopen sessions after logon (Startup folder: no admin rights needed)
 $startup = [Environment]::GetFolderPath('Startup')

@@ -64,8 +64,9 @@ roost new api C:\src\api
 roost                    # dashboard: a click, arrow keys + Enter, or a session's key open / switch;  Ctrl+B d detaches
 ```
 
-The dashboard (the `dash` window of the `roost` psmux session) redraws in place every 2 seconds; the status bar shows each
-window's state glyph in colour and the totals on the right. Best viewed in Windows Terminal.
+The dashboard (the `dash` window of the `roost` psmux session) redraws in place every 2 seconds. The status bar works like
+the Linux one: it lists the dashboard, the current window and the sessions that want something (`3:api ●`), with the
+totals and the system drive's usage on the right. Best viewed in Windows Terminal.
 
 - Click a row to open that session; the mouse wheel moves the selection (`ROOST_MOUSE=0` turns the mouse off). Only the
   dashboard takes the mouse; the other windows keep psmux's normal mouse handling.

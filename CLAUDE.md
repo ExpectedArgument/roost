@@ -104,6 +104,14 @@ roost never passes `--model` or effort flags. Default claude flags come from `co
 - psmux has no per-window user options. The hook therefore puts the glyph into the **window name** (`"● api"`), and
   the status-bar format in `Set-PcTheme` parses the name's first character. Window lookup (`Get-WinId`) matches
   `^(\S\s)?NAME$`, which is why session names must match `^[A-Za-z0-9._-]+$` (no spaces).
+- The dash also keeps those glyphs in step with the registry (`Sync-WinNames`). Hooks of a session that was moved to a
+  background job run outside psmux and cannot rename the window.
+- The status bar mirrors `linux/tmux.conf`: it shows only the dash window, the current window and the busy, attention
+  and waiting windows, as `3:api ●`.
+  - Inspect a window's rendered piece with `psmux display-message -p -t S:N '#{E:window-status-format}'`.
+  - Status strings go through strftime, so a literal `%` must be written `%%`.
+- In PowerShell strings write `${Dot}?`, not `$Dot?`. `?` is a valid variable-name character, so `"$Dot?"` expands
+  the empty variable `Dot?`.
 - psmux window ids (`@N`) are **per psmux session**, not per server. Always target `"<session>:@N"`. `Get-WinId`
   returns that form, and the hook renames with it. A bare `@N` can select, or kill, a window of another psmux session.
 - Dashboard input:

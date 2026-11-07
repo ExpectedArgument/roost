@@ -361,25 +361,29 @@ function Test-PcUp {
     return ($LASTEXITCODE -eq 0)
 }
 
-# status bar look of the roost psmux session. Driven only by the glyph the hook puts in front of the window name
-# ("● api"), because psmux has no per-window user options. Idempotent; only touches the roost session.
+# status bar look of the roost psmux session, the same as the Linux tmux.conf: it lists only the dash window, the
+# current window and the sessions that want something, as "3:api ●" (● working, ? decide, * your turn); quiet sessions
+# are hidden, the current window is reversed. psmux has no per-window user options, so the state is the glyph in front
+# of the window name ("● api"), put there by the hook and kept in step by the dash window (Sync-WinNames).
+# Idempotent; only touches the roost session.
 function Set-PcTheme {
     $first = '#{=1:window_name}'
-    $bare = '#{s/^. //:window_name}'             # name without the glyph (names never contain spaces)
-    $glyph = "#{?#{==:$first,$Dot},#[fg=colour214],#{?#{==:$first,?},#[fg=colour201]#[bold],#{?#{==:$first,*},#[fg=colour51],#[fg=colour244]}}}"
-    $plain = "#{?#{==:$bare,#{window_name}},#W,$glyph$first#[default] $bare}"
-    $current = "#{?#{==:$bare,#{window_name}},#W,$glyph$first#[fg=colour255] $bare}"
+    $bare = "#{s/^[${Dot}?*${Ring}] //:window_name}"   # name without the glyph (session names never contain these)
+    $busy = "#{==:$first,$Dot}"; $ask = "#{==:$first,?}"; $wait = "#{==:$first,*}"; $idle = "#{==:$first,$Ring}"
+    $shown = "#{||:#{==:#{window_name},dash},#{||:$busy,#{||:$ask,$wait}}}"
+    $mark = "#{?$busy,#[fg=colour214] $Dot,#{?$ask,#[fg=colour201]#[bold] ?,#{?$wait,#[fg=colour51] *,}}}"
+    $markCur = "#{?$busy, $Dot,#{?$ask, ?,#{?$wait, *,#{?$idle, $Ring,}}}}"
     $opts = [ordered]@{
         'mouse'                        = 'on'
         'status-interval'              = '2'
         'allow-rename'                 = 'off'
         'status-style'                 = 'bg=colour235,fg=colour250'
-        'status-left'                  = '#[bg=colour39,fg=colour16,bold] roost #[default] '
-        'status-left-length'           = '12'
+        'status-left'                  = ' roost '
+        'status-left-length'           = '8'
         'status-right-length'          = '60'          # status-right itself is pushed by the dash window
         'window-status-separator'      = ''
-        'window-status-format'         = " #[fg=colour244]#I#[default] $plain "
-        'window-status-current-format' = "#[bg=colour238,fg=colour255,bold] #I $current #[default]"
+        'window-status-format'         = "#{?$shown, #I:$bare$mark#[default] ,}"
+        'window-status-current-format' = "#[reverse]#[bold] #I:$bare$markCur #[default]"
         'pane-border-style'            = 'fg=colour238'
         'pane-active-border-style'     = 'fg=colour39'
         'message-style'                = 'bg=colour39,fg=colour16'
@@ -406,13 +410,37 @@ function Invoke-Attach {
     if ($old) { try { [Console]::Title = $old } catch { } }
 }
 
-# right side of the status bar: "●2 ?1 *0 ○3 ⏸1  14:02" (pushed by the dash window when the counts change)
+# right side of the status bar: "●2 ?1 *0 ○3 ⏸1 C:61%  14:02", disk in red from 90% (pushed by the dash window when it
+# changes; "%%" because psmux runs the status line through strftime)
 function Format-StatusRight($Counts) {
     $parts = foreach ($k in $Counts.Keys) {
         $c = if ($Counts[$k]) { $States[$k].Mux } else { 'colour240' }
         "#[fg=$c]$($States[$k].Glyph)$($Counts[$k])"
     }
-    return (($parts -join ' ') + '  #[fg=colour245]%H:%M ')
+    $disk = ''
+    try {
+        $dv = [IO.DriveInfo]::new($env:SystemDrive)
+        $pct = [int][Math]::Round(100 * (1 - $dv.AvailableFreeSpace / $dv.TotalSize))
+        $dc = if ($pct -ge 90) { 'colour196,bold' } else { 'colour245' }
+        $disk = " #[fg=$dc]$($env:SystemDrive)$pct%%"
+    } catch { }
+    return (($parts -join ' ') + $disk + '  #[fg=colour245]%H:%M ')
+}
+
+# keeps the glyph in front of each open session's window name in step with the registry. The hook renames at once
+# when it can; a session moved to a background job runs its hooks outside psmux and cannot.
+function Sync-WinNames($Rows) {
+    $want = @{}
+    foreach ($r in $Rows) { if ($r.State -ne 'parked') { $want[$r.Name] = $States[$r.State].Glyph + ' ' + $r.Name } }
+    if (-not $want.Count) { return }
+    foreach ($l in @(& psmux list-windows -t $PcSess -F '#{window_id}|#{window_name}' 2>$null)) {
+        $p = "$l".Split('|', 2)
+        if ($p.Count -ne 2) { continue }
+        $bare = $p[1] -replace '^\S\s', ''
+        if ($want.ContainsKey($bare) -and $p[1] -cne $want[$bare]) {
+            & psmux rename-window -t "${PcSess}:$($p[0])" $want[$bare] 2>$null | Out-Null
+        }
+    }
 }
 
 # creates the psmux session (detached) with the "dash" window if it does not exist yet
@@ -496,6 +524,7 @@ function Show-Dash {
                 if ($sr -ne $lastStatus) { & psmux set-option -t $PcSess status-right $sr 2>$null | Out-Null; $lastStatus = $sr }
                 $tt = Format-Title $counts
                 if ($tt -ne $lastTitle) { & psmux set-option -t $PcSess set-titles-string $tt 2>$null | Out-Null; $lastTitle = $tt }
+                Sync-WinNames $rows
             }
             $ix = -1
             for ($i = 0; $i -lt $rows.Count; $i++) { if ($rows[$i].Name -eq $sel) { $ix = $i; break } }
