@@ -200,8 +200,8 @@ Environment: `ROOST_PROJECT_ROOT`, `ROOST_AUTOCONTINUE=0` (never send the contin
 - **Nothing is assumed about Claude Code internals.** Its per-process files and transcripts are undocumented, so every
   read is defensive: a missing file or field means an empty cell, never a failed command.
 - **No surprises with permissions.** A restored session gets back its own permission mode, except `bypassPermissions`,
-  which is never restored automatically. On Windows, `roost close` sends Esc before `/exit`, so a pending permission
-  prompt is cancelled, never answered.
+  which is never restored automatically. `roost close` sends Esc before `/exit`, so a pending permission prompt is
+  cancelled, never answered.
 - **No telemetry, no daemon.** The only network access is the reachability check before a boot-time restore.
 
 ## Testing
@@ -227,7 +227,7 @@ alone. Extra flags you give `roost new` are passed to claude unchanged.
 
 **A session shows `✗ exited` or `SHELL`. What happened?**
 claude quit, for example after a crash or a Ctrl+C, and its window stayed open as a plain shell. `roost restore NAME`
-resumes it in a fresh window. On Windows, picking it on the dashboard or `roost NAME` does the same.
+resumes it in a fresh window, and so do picking it on the dashboard and `roost NAME`.
 
 **Does it work remotely?**
 Yes. Detach, disconnect, come back: `ssh -t HOST roost` on Linux. On Windows, sessions survive a dropped Remote Desktop
