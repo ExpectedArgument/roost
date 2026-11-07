@@ -7,17 +7,22 @@
 #   roost ls                             list sessions
 #   roost NAME                           open / switch to a session
 #   roost new NAME [DIR] [claude args]   open a session window, e.g.  roost new api C:\src\api -c
-#   roost restore [NAME]                 reopen parked sessions (parked = registered but its window is gone)
-#   roost close NAME                     close the window and forget the session
+#                                        DIR defaults to $ROOST_PROJECT_ROOT\NAME (default ~\NAME) if it exists, else here;
+#                                        --connectors keeps claude.ai connectors on for this session
+#   roost restore [NAME]                 reopen parked sessions (no window) and exited ones (claude quit in its window)
+#   roost close NAME                     /exit the session, close its window and forget it
 #   roost forget NAME                    forget the registry entry only
+#   roost next                           jump to the next session that waits for you (? first, then *); psmux: Ctrl+B a
 #   roost doctor                         health check
 #   roost selftest                       check the scripts without opening any window
 #
 # Registry: %LOCALAPPDATA%\roost\sessions\NAME.json, written by roost-hook.ps1 through Claude Code hooks.
 # Only /exit or /logout forgets a session; closing the window or rebooting keeps it for `roost restore`.
+# Config (%LOCALAPPDATA%\roost\config): claude-flags, resume-prompt.txt, connectors-allow (sessions, or *, that keep
+# claude.ai connectors on; others start with ENABLE_CLAUDEAI_MCP_SERVERS=false).
 # Env overrides: ROOST_HOME, ROOST_DRY=1 (print the psmux command instead of running it), ROOST_STAGGER (s), ROOST_NET_WAIT (s),
 #                ROOST_AUTOCONTINUE=0 (never send the automatic "continue" prompt), ROOST_PSMUX_SESSION (default roost),
-#                ROOST_MOUSE=0 (dashboard ignores the mouse)
+#                ROOST_MOUSE=0 (dashboard ignores the mouse), ROOST_CLAUDE_BIN, ROOST_PROJECT_ROOT
 
 $ErrorActionPreference = 'Stop'
 $CsArgs = $args
@@ -31,7 +36,9 @@ $Self = $PSCommandPath
 $Runner = Join-Path $Here 'roost-run.ps1'
 $FlagsFile = Join-Path $ConfDir 'claude-flags'
 $PromptFile = Join-Path $ConfDir 'resume-prompt.txt'
+$ConnFile = Join-Path $ConfDir 'connectors-allow'
 if (-not (Test-Path -LiteralPath $FlagsFile)) { Set-Content -LiteralPath $FlagsFile -Value '--permission-mode auto' }
+if (-not (Test-Path -LiteralPath $ConnFile)) { Set-Content -LiteralPath $ConnFile -Value '*' }
 
 # ---- look ------------------------------------------------------------------------------------------------------------
 # One palette for the dashboard, `roost ls`, doctor and the psmux status bar (same colours as the Linux tmux.conf).
@@ -52,6 +59,7 @@ $States = [ordered]@{
     waiting   = @{ Glyph = '*'; Label = 'your turn'; Sgr = '38;5;51'; Mux = 'colour51' }
     idle      = @{ Glyph = $Ring; Label = 'quiet'; Sgr = '38;5;40'; Mux = 'colour40' }
     parked    = @{ Glyph = $Pause; Label = 'parked'; Sgr = '38;5;39'; Mux = 'colour39' }
+    shell     = @{ Glyph = $Cross; Label = 'exited'; Sgr = '38;5;196'; Mux = 'colour196' }   # claude quit, the window stayed (Linux: SHELL)
 }
 
 function Paint([string]$Text, [string]$Sgr) {
@@ -112,6 +120,101 @@ function Get-RcIndex {
         if ($job) { $idx[[string]$j.sessionId] = $(if ($job.bridgeSessionId) { 'on' } else { 'off' }) }
     }
     return $idx
+}
+
+# ---- model / effort / advisor -----------------------------------------------------------------------------------------
+# Hooks don't carry these (model only on some SessionStarts, the advisor nowhere), but every assistant entry of the
+# session's transcript does: message.model, effort and advisorModel, including /model, /effort and /advisor changes.
+# Internal, undocumented format: read only the end of the file, skip subagent (isSidechain) entries, fail soft, and
+# cache per transcript until the file changes.
+$InfoCache = @{}
+$NoInfo = [pscustomobject]@{ Model = ''; Effort = ''; Advisor = '' }
+
+# "claude-opus-5-5" -> "opus 5.5", "claude-3-5-sonnet-20241022" -> "sonnet 3.5"; anything else as it is
+function Format-Model([string]$Id) {
+    $m = ($Id -replace '^claude-', '' -replace '-\d{8}$', '' -replace '\[[^\]]*\]$', '').ToLowerInvariant()
+    if ($m -match '^([a-z]+)-(\d+)-(\d+)$') { return "$($matches[1]) $($matches[2]).$($matches[3])" }
+    if ($m -match '^([a-z]+)-(\d+)$') { return "$($matches[1]) $($matches[2])" }
+    if ($m -match '^(\d+)-(\d+)-([a-z]+)$') { return "$($matches[3]) $($matches[1]).$($matches[2])" }
+    return $m
+}
+
+# the last main-thread assistant entry within the last $Tail bytes of a transcript, parsed, or $null
+function Read-LastAssistant([string]$Path, [long]$Tail) {
+    $fs = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+    try {
+        $start = [Math]::Max(0, $fs.Length - $Tail)
+        $buf = [byte[]]::new($fs.Length - $start)
+        [void]$fs.Seek($start, [IO.SeekOrigin]::Begin)
+        $n = 0; while ($n -lt $buf.Length) { $r = $fs.Read($buf, $n, $buf.Length - $n); if ($r -le 0) { break }; $n += $r }
+    } finally { $fs.Dispose() }
+    $lines = [Text.Encoding]::UTF8.GetString($buf, 0, $n).Split("`n")
+    $first = if ($start -gt 0) { 1 } else { 0 }   # the first line of a tail read is cut off
+    for ($i = $lines.Count - 1; $i -ge $first; $i--) {
+        $l = $lines[$i]
+        if (-not $l.Contains('"type":"assistant"')) { continue }
+        try { $j = $l | ConvertFrom-Json -Depth 100 } catch { continue }
+        if ($j.type -eq 'assistant' -and -not $j.isSidechain -and $j.message.model) { return $j }
+    }
+    return $null
+}
+
+# a small JSON file, parsed, cached until it changes; $null when missing or unreadable
+$JsonCache = @{}
+function Read-JsonCached([string]$Path) {
+    try { $fi = [IO.FileInfo]::new($Path) } catch { return $null }
+    if (-not $fi.Exists) { return $null }
+    $key = "$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)"
+    $c = $script:JsonCache[$Path]
+    if ($c -and $c.Key -eq $key) { return $c.Obj }
+    $o = try { Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch { $null }
+    $script:JsonCache[$Path] = @{ Key = $key; Obj = $o }
+    return $o
+}
+
+# what a session that has not answered yet is configured to use (shown dim): the cwd's .claude\settings.local.json,
+# then .claude\settings.json, then the user's settings (model, effortLevel, advisorModel), overridden by the --model /
+# --effort / --advisor it was launched with (run\NAME.args.json)
+function Get-ConfiguredInfo([string]$Name, [string]$Cwd) {
+    $v = @{ model = ''; effortLevel = ''; advisorModel = '' }
+    $files = @()
+    if ($Cwd) { $files += (Join-Path $Cwd '.claude\settings.local.json'), (Join-Path $Cwd '.claude\settings.json') }
+    $files += (Join-Path $ClaudeDir 'settings.json')
+    foreach ($f in $files) {
+        $j = Read-JsonCached $f
+        if (-not $j) { continue }
+        foreach ($k in @($v.Keys)) { if (-not $v[$k] -and $j.$k) { $v[$k] = [string]$j.$k } }
+    }
+    $a = Read-JsonCached (Join-Path $RunDir "$Name.args.json")
+    $x = @(if ($a) { $a.extra })
+    for ($i = 0; $i -lt $x.Count - 1; $i++) {
+        switch ($x[$i]) { '--model' { $v.model = [string]$x[$i + 1] } '--effort' { $v.effortLevel = [string]$x[$i + 1] } '--advisor' { $v.advisorModel = [string]$x[$i + 1] } }
+    }
+    return [pscustomobject]@{ Model = (Format-Model $v.model); Effort = $v.effortLevel; Advisor = (Format-Model $v.advisorModel); Configured = $true }
+}
+
+function Get-TranscriptInfo([string]$Path) {
+    if (-not $Path) { return $NoInfo }
+    try { $fi = [IO.FileInfo]::new($Path) } catch { return $NoInfo }
+    if (-not $fi.Exists) { return $NoInfo }
+    $key = "$($fi.Length)|$($fi.LastWriteTimeUtc.Ticks)"
+    $c = $script:InfoCache[$Path]
+    if ($c -and $c.Key -eq $key) { return $c.Info }
+    $info = $NoInfo
+    try {
+        foreach ($tail in 65536, 1048576, 8388608) {   # an entry can be large (tool input): widen the window if needed
+            $j = Read-LastAssistant $fi.FullName $tail
+            if ($j) {
+                $adv = ''
+                if ($j.PSObject.Properties['advisorModel']) { $adv = if ($j.advisorModel) { Format-Model ([string]$j.advisorModel) } else { 'off' } }
+                $info = [pscustomobject]@{ Model = (Format-Model ([string]$j.message.model)); Effort = [string]$j.effort; Advisor = $adv }
+                break
+            }
+            if ($tail -ge $fi.Length) { break }
+        }
+    } catch { }
+    $script:InfoCache[$Path] = @{ Key = $key; Info = $info }
+    return $info
 }
 
 # ---- dashboard input: keys and mouse ----------------------------------------------------------------------------------
@@ -275,15 +378,27 @@ function Get-Entries {
 
 function Test-Name([string]$Name) { return ($Name -match '^[A-Za-z0-9._-]+$') }
 
-# A session is "open" while the window's shell (started by roost-run.ps1) is still running.
-function Test-Alive([string]$Name) {
+# open: the window's shell (started by roost-run.ps1) runs and claude in it; exited: claude quit and the window is a
+# plain shell (roost-run.ps1 marks run.json); none: no window (pid gone, or reused by another process)
+function Get-RunState([string]$Name) {
     $f = Join-Path $RunDir "$Name.run.json"
-    if (-not (Test-Path -LiteralPath $f)) { return $false }
+    if (-not (Test-Path -LiteralPath $f)) { return 'none' }
     try {
         $r = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
         $p = Get-Process -Id ([int]$r.pid) -ErrorAction SilentlyContinue
-        return [bool]($p -and ($p.StartTime.ToFileTimeUtc() -eq [int64]$r.start))
-    } catch { return $false }
+        if (-not ($p -and ($p.StartTime.ToFileTimeUtc() -eq [int64]$r.start))) { return 'none' }
+        if ($r.exited) { return 'exited' }
+        return 'open'
+    } catch { return 'none' }
+}
+
+# A session is "open" while claude runs in its window; parked and exited ones are what `roost restore` reopens.
+function Test-Alive([string]$Name) { return ((Get-RunState $Name) -eq 'open') }
+
+# claude.ai connectors on for this session? (config\connectors-allow: session names or *; the same rule as roost-run.ps1)
+function Test-ConnAllowed([string]$Name) {
+    if (-not (Test-Path -LiteralPath $ConnFile)) { return $true }
+    return [bool](@(Get-Content -LiteralPath $ConnFile) | ForEach-Object { $_.Trim() } | Where-Object { $_ -eq '*' -or $_ -eq $Name })
 }
 
 function Format-Age([long]$Sec) {
@@ -293,9 +408,10 @@ function Format-Age([long]$Sec) {
     return "$([math]::Floor($Sec / 86400))d"
 }
 
-# parked (no window) | busy | attention (? needs a decision) | waiting (* your turn) | idle
-function Get-StateKey($e, [bool]$Alive) {
-    if (-not $Alive) { return 'parked' }
+# parked (no window) | shell (claude exited, window stayed) | busy | attention (? needs a decision) | waiting (* your turn) | idle
+function Get-StateKey($e, [string]$Run) {
+    if ($Run -eq 'none') { return 'parked' }
+    if ($Run -eq 'exited') { return 'shell' }
     $d = [string]$e.display
     if ($d -in 'busy', 'attention', 'waiting') { return $d }
     return 'idle'
@@ -308,14 +424,20 @@ function Get-Rows {
     foreach ($e in (Get-Entries | Sort-Object name)) {
         if (-not $e.name) { continue }
         $sid = [string]$e.session_id
-        $alive = Test-Alive ([string]$e.name)
+        $run = Get-RunState ([string]$e.name)
+        $info = Get-TranscriptInfo ([string]$e.transcript)
+        if (-not $info.Model) { $info = Get-ConfiguredInfo ([string]$e.name) ([string]$e.cwd) }   # no answer yet
         [pscustomobject]@{
-            Name  = [string]$e.name
-            State = Get-StateKey $e $alive
-            Age   = Format-Age ($now - [long]$e.updated)
-            Rc    = $(if ($alive -and $sid -and $rc.ContainsKey($sid)) { $rc[$sid] } else { '' })
-            Cwd   = Format-Path ([string]$e.cwd)
-            Sid   = $sid.Substring(0, [Math]::Min(8, $sid.Length))
+            Name       = [string]$e.name
+            State      = Get-StateKey $e $run
+            Age        = Format-Age ($now - [long]$e.updated)
+            Rc         = $(if ($run -eq 'open' -and $sid -and $rc.ContainsKey($sid)) { $rc[$sid] } else { '' })
+            Model      = $info.Model
+            Effort     = $info.Effort
+            Advisor    = $info.Advisor
+            Configured = [bool]$info.Configured
+            Cwd        = Format-Path ([string]$e.cwd)
+            Sid        = $sid.Substring(0, [Math]::Min(8, $sid.Length))
         }
     }
 }
@@ -327,29 +449,53 @@ function Get-Counts($Rows) {
     return $c
 }
 
-# "● 2  ? 1  * 0  ○ 3  ⏸ 1" (zero counts dimmed)
+# "● 2  ? 1  * 0  ○ 3  ⏸ 1" (zero counts dimmed; "exited" only when there is one)
 function Format-Counts($Counts) {
     $parts = foreach ($k in $Counts.Keys) {
+        if ($k -eq 'shell' -and -not $Counts[$k]) { continue }
         $t = $States[$k].Glyph + ' ' + $Counts[$k]
         if ($Counts[$k]) { Paint $t $States[$k].Sgr } else { Paint $t $Faint }
     }
     return ($parts -join '  ')
 }
 
+# the optional MODEL / EFFORT / ADVISOR columns: as many as leave the directory column at least $MinDir wide
+function Get-InfoColumns([int]$Free, [int]$MinDir = 16) {
+    $cols = [System.Collections.Generic.List[object]]::new()
+    foreach ($c in @(@('MODEL', 'Model', 10), @('EFFORT', 'Effort', 6), @('ADVISOR', 'Advisor', 10))) {
+        if ($Free - ($c[2] + 2) -lt $MinDir) { break }
+        $cols.Add($c); $Free -= $c[2] + 2
+    }
+    return , $cols
+}
+# dim: a parked session, or values only configured so far (the session has not answered since it started)
+function Format-InfoCells($Row, $Cols) {
+    $s = ''
+    foreach ($c in $Cols) {
+        $t = Fit ([string]$Row.($c[1])) $c[2]
+        $s += $(if ($Row.State -eq 'parked' -or $Row.Configured) { Paint $t $Dim } else { $t }) + '  '
+    }
+    return $s
+}
+function Format-InfoHeads($Cols) { $s = ''; foreach ($c in $Cols) { $s += (Fit $c[0] $c[2]) + '  ' }; return $s }
+
 function Show-List {
     $rows = @(Get-Rows)
     if (-not $rows) { Write-Output ('no sessions yet - start one with:  ' + (Paint 'roost new NAME [DIR]' $Accent)); return }
     $nw = [Math]::Min(24, [Math]::Max(4, ($rows.Name | Measure-Object -Property Length -Maximum).Maximum))
     $sw = 11
-    $dw = [Math]::Max(16, (Get-Width) - 1 - (2 + $nw + 2 + $sw + 2 + 4 + 2 + 3 + 2 + 2 + 8))
+    $free = (Get-Width) - 1 - (2 + $nw + 2 + $sw + 2 + 4 + 2 + 3 + 2 + 2 + 8)
+    $cols = Get-InfoColumns $free
+    foreach ($c in $cols) { $free -= $c[2] + 2 }
+    $dw = [Math]::Max(16, $free)
     Write-Output ''
     Write-Output ('  ' + (Paint ' roost ' $Badge) + '  ' + (Paint "$($rows.Count) session(s)" $Dim) + '    ' + (Format-Counts (Get-Counts $rows)))
     Write-Output ''
-    Write-Output (Paint ('  ' + (Fit 'NAME' $nw) + '  ' + (Fit 'STATE' $sw) + '  ' + (Fit 'AGE' 4) + '  ' + (Fit 'RC' 3) + '  ' + (Fit 'DIRECTORY' $dw) + '  SESSION') $Dim)
+    Write-Output (Paint ('  ' + (Fit 'NAME' $nw) + '  ' + (Fit 'STATE' $sw) + '  ' + (Fit 'AGE' 4) + '  ' + (Fit 'RC' 3) + '  ' + (Format-InfoHeads $cols) + (Fit 'DIRECTORY' $dw) + '  SESSION') $Dim)
     foreach ($r in $rows) {
         $name = Fit $r.Name $nw
         if ($r.State -in 'attention', 'waiting') { $name = Paint $name '1' }
-        Write-Output ('  ' + $name + '  ' + (Format-State $r.State $sw) + '  ' + (Paint (Fit $r.Age 4) $Dim) + '  ' + (Format-Rc $r.Rc 3) + '  ' + (Fit $r.Cwd $dw -KeepEnd) + '  ' + (Paint $r.Sid $Dim))
+        Write-Output ('  ' + $name + '  ' + (Format-State $r.State $sw) + '  ' + (Paint (Fit $r.Age 4) $Dim) + '  ' + (Format-Rc $r.Rc 3) + '  ' + (Format-InfoCells $r $cols) + (Fit $r.Cwd $dw -KeepEnd) + '  ' + (Paint $r.Sid $Dim))
     }
     Write-Output ''
 }
@@ -396,6 +542,8 @@ function Set-PcTheme {
         'set-titles-string'            = "$Bird roost"
     }
     foreach ($k in $opts.Keys) { & psmux set-option -t $PcSess $k $opts[$k] 2>$null | Out-Null }
+    # Ctrl+B a: jump to the next session that waits for you (like the Linux tmux.conf; key bindings are server-wide)
+    & psmux bind-key a run-shell -b "pwsh -NoProfile -File `"$Self`" next #{session_name}" 2>$null | Out-Null
 }
 
 # terminal tab title: "🐦 roost", plus the sessions that wait for you: "🐦 roost  ?1 *2"
@@ -418,6 +566,7 @@ function Invoke-Attach {
 # changes; "%%" because psmux runs the status line through strftime)
 function Format-StatusRight($Counts) {
     $parts = foreach ($k in $Counts.Keys) {
+        if ($k -eq 'shell' -and -not $Counts[$k]) { continue }
         $c = if ($Counts[$k]) { $States[$k].Mux } else { 'colour240' }
         "#[fg=$c]$($States[$k].Glyph)$($Counts[$k])"
     }
@@ -432,10 +581,14 @@ function Format-StatusRight($Counts) {
 }
 
 # keeps the glyph in front of each open session's window name in step with the registry. The hook renames at once
-# when it can; a session moved to a background job runs its hooks outside psmux and cannot.
+# when it can; a session moved to a background job runs its hooks outside psmux and cannot. A window whose claude
+# exited gets its bare name, so the status bar does not show a stale state for it.
 function Sync-WinNames($Rows) {
     $want = @{}
-    foreach ($r in $Rows) { if ($r.State -ne 'parked') { $want[$r.Name] = $States[$r.State].Glyph + ' ' + $r.Name } }
+    foreach ($r in $Rows) {
+        if ($r.State -eq 'shell') { $want[$r.Name] = $r.Name }
+        elseif ($r.State -ne 'parked') { $want[$r.Name] = $States[$r.State].Glyph + ' ' + $r.Name }
+    }
     if (-not $want.Count) { return }
     foreach ($l in @(& psmux list-windows -t $PcSess -F '#{window_id}|#{window_name}' 2>$null)) {
         $p = "$l".Split('|', 2)
@@ -447,9 +600,23 @@ function Sync-WinNames($Rows) {
     }
 }
 
+# Variables a Claude Code tool shell (CLAUDECODE=1) carries for ITS session: nesting marker, session / bridge /
+# messaging ids, and the tool-shell defaults (NO_COLOR, GIT_EDITOR=true, ...). psmux copies the caller's environment
+# into a NEW session and every window of it inherits that, so a roost session started from such a shell would hand
+# them to every claude it runs: CLAUDECODE alone makes claude refuse to start as a nested session. User settings such
+# as CLAUDE_CODE_GIT_BASH_PATH are kept. roost-run.ps1 drops the same list again before it starts claude.
+$ClaudeShellVars = '^(CLAUDECODE|CLAUDE_PID|CLAUDE_JOB_DIR|CLAUDE_ENV_FILE|CLAUDE_CODE_(ENTRYPOINT|SESSION_ID|BRIDGE_SESSION_ID|' +
+'CHILD_SESSION|MESSAGING_SOCKET|MESSAGING_TOKEN|SESSION_ATTENDED|SSE_PORT|ALT_SCREEN_FULL_REPAINT|HOST_SHORT_TEMP_DIRS|' +
+'DISABLE_TERMINAL_TITLE)|NO_COLOR|GIT_EDITOR|GIT_TERMINAL_PROMPT|GIT_ASKPASS|COREPACK_ENABLE_AUTO_PIN)$'
+function Clear-ClaudeShellEnv {
+    if (-not $env:CLAUDECODE) { return }
+    foreach ($v in @(Get-ChildItem env: | Where-Object { $_.Name -match $ClaudeShellVars })) { Remove-Item "env:$($v.Name)" -ErrorAction SilentlyContinue }
+}
+
 # creates the psmux session (detached) with the "dash" window if it does not exist yet
 function Initialize-Pc {
     if (Test-PcUp) { return }
+    Clear-ClaudeShellEnv   # new-session copies our environment into the session
     $dashCmd = "pwsh -NoLogo -NoExit -File `"$Self`" dash"
     & psmux new-session -d -s $PcSess -n dash -c $env:USERPROFILE $dashCmd
     Set-PcTheme
@@ -457,27 +624,38 @@ function Initialize-Pc {
 
 # target ("roost:@N") of the session's window; its name is "NAME" or "<glyph> NAME" (the hook adds the glyph).
 # Always session-qualified: psmux window ids are per session, so a bare @N can hit a window of another psmux session.
-function Get-WinId([string]$Name) {
+function Get-WinId([string]$Name, [string]$Not = '') {
     $rx = '^(\S\s)?' + [regex]::Escape($Name) + '$'
     foreach ($l in @(& psmux list-windows -t $PcSess -F '#{window_id}|#{window_name}' 2>$null)) {
         $p = "$l".Split('|', 2)
-        if ($p.Count -eq 2 -and $p[1] -match $rx) { return "${PcSess}:$($p[0])" }
+        if ($p.Count -eq 2 -and $p[1] -match $rx -and "${PcSess}:$($p[0])" -ne $Not) { return "${PcSess}:$($p[0])" }
     }
     return $null
 }
 
-function Start-Tab([string]$Name, [string]$Cwd, [string]$Sid, [string]$Prompt, [string[]]$Extra) {
+function Start-Tab([string]$Name, [string]$Cwd, [string]$Sid, [string]$Prompt, [string[]]$Extra, [bool]$Conn = $false) {
     $extraList = @($Extra | Where-Object { $_ })
-    $a = [ordered]@{ sid = $Sid; prompt = $Prompt; extra = $extraList }
+    $a = [ordered]@{ sid = $Sid; prompt = $Prompt; extra = $extraList; conn = $Conn }
+    # the window gets its psmux session's environment, not ours: hand our overrides to roost-run.ps1 explicitly
+    if ($env:ROOST_CLAUDE_BIN) { $a['bin'] = $env:ROOST_CLAUDE_BIN }
+    if ($env:ROOST_PSMUX_SESSION) { $a['mux'] = $PcSess }
     [IO.File]::WriteAllText((Join-Path $RunDir "$Name.args.json"), ($a | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
     $dir = $Cwd.TrimEnd('\')
     $cmd = "pwsh -NoLogo -NoExit -File `"$Runner`" $Name"
+    if ($env:ROOST_HOME) { $cmd += " -RoostHome `"$CsHome`"" }
     $wargs = @('new-window', '-d', '-t', "${PcSess}:", '-n', $Name, '-c', $dir, $cmd)
     if ($env:ROOST_DRY) { Write-Host ('psmux ' + ($wargs -join ' ')); return }
     Initialize-Pc
-    $old = Get-WinId $Name
-    if ($old) { & psmux kill-window -t $old 2>$null | Out-Null }   # stale window of a dead session
+    $old = Get-WinId $Name   # a stale window: claude exited in it, or its session died
     & psmux @wargs
+    if ($old) {
+        # the old window goes last: this command may run inside it (`roost NAME` typed in an exited session's shell)
+        if ($env:TMUX_PANE -and "$(& psmux display-message -p -t $old '#{pane_id}' 2>$null)".Trim() -eq $env:TMUX_PANE) {
+            $new = Get-WinId $Name $old
+            if ($new) { & psmux select-window -t $new 2>$null | Out-Null }
+        }
+        & psmux kill-window -t $old 2>$null | Out-Null
+    }
 }
 
 # focus a session window; from outside psmux this also attaches the terminal to the roost screen
@@ -515,7 +693,7 @@ function Show-Dash {
     $mouse = $reader -and $wantMouse
     $hints = @(
         @($Arrows, 'select'), @($(if ($mouse) { 'Enter/click' } else { 'Enter' }), 'open'), @('1-9 a-z', 'jump'),
-        @('Ctrl+B n/p', 'next / previous'), @('Ctrl+B w', 'all windows'), @('Ctrl+B d', 'detach')
+        @('Ctrl+B a', 'next waiting'), @('Ctrl+B n/p', 'next / previous'), @('Ctrl+B w', 'all windows'), @('Ctrl+B d', 'detach')
     )
     [Console]::Out.Write("$E[?25l$E[?7l")   # hide the cursor, no line wrap
     if ($mouse) { [Console]::Out.Write("$E[?1000h$E[?1006h") }   # ask for clicks: psmux forwards them to this pane only
@@ -552,8 +730,11 @@ function Show-Dash {
             } else {
                 $nw = [Math]::Min(24, [Math]::Max(4, ($rows.Name | Measure-Object -Property Length -Maximum).Maximum))
                 $sw = 11
-                $dw = [Math]::Max(0, $W - (3 + 3 + $sw + 2 + $nw + 2 + 4 + 2 + 3 + 2))
-                $L.Add((Paint ('      ' + (Fit 'STATE' $sw) + '  ' + (Fit 'NAME' $nw) + '  ' + (Fit 'AGE' 4) + '  ' + (Fit 'RC' 3) + '  DIRECTORY') $Dim))
+                $free = $W - (3 + 3 + $sw + 2 + $nw + 2 + 4 + 2 + 3 + 2)
+                $cols = Get-InfoColumns $free 12
+                foreach ($c in $cols) { $free -= $c[2] + 2 }
+                $dw = [Math]::Max(0, $free)
+                $L.Add((Paint ('      ' + (Fit 'STATE' $sw) + '  ' + (Fit 'NAME' $nw) + '  ' + (Fit 'AGE' 4) + '  ' + (Fit 'RC' 3) + '  ' + (Format-InfoHeads $cols) + 'DIRECTORY') $Dim))
                 $body = [Math]::Max(1, $H - 8)   # title, rule, blank, column names, "x-y of n", blank, rule, keys
                 if ($ix -lt $top) { $top = $ix }
                 if ($ix -ge $top + $body) { $top = $ix - $body + 1 }
@@ -565,7 +746,8 @@ function Show-Dash {
                     if ($on -or $r.State -in 'attention', 'waiting') { $name = Paint $name '1' }
                     $line = ' ' + $(if ($on) { Paint $Mark "1;$Accent" } else { ' ' }) + ' ' +
                         (Paint ([string]$keys[$i]) $(if ($on) { "1;$Accent" } else { $Accent })) + '  ' +
-                        (Format-State $r.State $sw) + '  ' + $name + '  ' + (Paint (Fit $r.Age 4) $Dim) + '  ' + (Format-Rc $r.Rc 3) + '  ' + (Fit $r.Cwd $dw -KeepEnd)
+                        (Format-State $r.State $sw) + '  ' + $name + '  ' + (Paint (Fit $r.Age 4) $Dim) + '  ' + (Format-Rc $r.Rc 3) + '  ' +
+                        (Format-InfoCells $r $cols) + (Fit $r.Cwd $dw -KeepEnd)
                     if ($on -and $UseColor) { $bg = "$E[48;5;236m"; $line = $bg + $line.Replace("$E[0m", "$E[0m$bg") + "$E[K$E[0m" }
                     $L.Add($line)
                 }
@@ -659,7 +841,11 @@ function Restore-Sessions([string]$Only, [bool]$Boot) {
         $p = ''
         if ($auto -and $e.state -eq 'busy' -and $sid) { $p = $prompt }
         $cwd = if ($e.cwd -and (Test-Path -LiteralPath $e.cwd)) { [string]$e.cwd } else { $env:USERPROFILE }
-        Start-Tab $e.name $cwd $sid $p @()
+        # the session's last permission mode comes back (never bypassPermissions, as on Linux), and its connectors
+        $extra = @()
+        if ([string]$e.permission_mode -in 'default', 'acceptEdits', 'plan', 'auto', 'dontAsk') { $extra = @('--permission-mode', [string]$e.permission_mode) }
+        $conn = ($e.connectors -eq $true) -or (Test-ConnAllowed ([string]$e.name))
+        Start-Tab $e.name $cwd $sid $p $extra $conn
         $n++
         if (-not $Only) { Start-Sleep -Seconds $stagger }
     }
@@ -671,12 +857,19 @@ function New-Session([string[]]$A) {
     $name = $A[0]
     if (-not (Test-Name $name)) { throw 'bad NAME (letters, digits, . _ -)' }
     $rest = @($A | Select-Object -Skip 1)
+    $conn = $rest -contains '--connectors'   # roost's own flag, not claude's
+    $rest = @($rest | Where-Object { $_ -ne '--connectors' })
     $dir = $null
     if ($rest.Count -gt 0 -and -not ([string]$rest[0]).StartsWith('-')) {
         $dir = [string]$rest[0]
         $rest = @($rest | Select-Object -Skip 1)
     }
-    if (-not $dir) { $dir = (Get-Location).Path }
+    if (-not $dir) {
+        # like Linux: $ROOST_PROJECT_ROOT\NAME (default ~\NAME) when that folder exists, else the current directory
+        $root = if ($env:ROOST_PROJECT_ROOT) { $env:ROOST_PROJECT_ROOT } else { $env:USERPROFILE }
+        $cand = Join-Path $root $name
+        $dir = if (Test-Path -LiteralPath $cand -PathType Container) { $cand } else { (Get-Location).Path }
+    }
     $dir = (Resolve-Path -LiteralPath $dir -ErrorAction Stop).Path
     if (Test-Alive $name) { Say "session '$name' is already open (roost $name switches to it)"; return }
     if ($rest.Count -eq 0 -and (Test-Path -LiteralPath (Join-Path $SessDir "$name.json"))) {
@@ -685,19 +878,64 @@ function New-Session([string[]]$A) {
         Switch-To $name
         return
     }
-    Start-Tab $name $dir '' '' $rest
+    Start-Tab $name $dir '' '' $rest ($conn -or (Test-ConnAllowed $name))
     if (-not $env:ROOST_DRY) { Switch-To $name }
 }
 
 function Remove-Session([string]$Name, [bool]$Kill) {
     if (-not $Name -or -not (Test-Name $Name)) { throw 'usage: roost close|forget NAME' }
-    if ($Kill -and (Test-Alive $Name)) {
-        $r = Get-Content -LiteralPath (Join-Path $RunDir "$Name.run.json") -Raw | ConvertFrom-Json
-        & taskkill /PID ([int]$r.pid) /T /F | Out-Null
+    $run = Get-RunState $Name
+    $r = $null
+    if ($run -ne 'none') { $r = Get-Content -LiteralPath (Join-Path $RunDir "$Name.run.json") -Raw | ConvertFrom-Json }
+    # forget first: `roost close NAME` may run inside the very window it closes
+    Remove-Item -LiteralPath (Join-Path $SessDir "$Name.json"), (Join-Path $SessDir "$Name.ask"), (Join-Path $RunDir "$Name.run.json"), (Join-Path $RunDir "$Name.args.json") -Force -ErrorAction SilentlyContinue
+    if ($Kill) {
+        $w = Get-WinId $Name
+        if ($w -and $run -eq 'open') {
+            # end claude cleanly, like Linux: Esc first (cancels a pending "?" prompt instead of answering it), then /exit
+            & psmux send-keys -t $w Escape 2>$null | Out-Null
+            Start-Sleep -Milliseconds 400
+            & psmux send-keys -t $w -l '/exit' 2>$null | Out-Null
+            & psmux send-keys -t $w Enter 2>$null | Out-Null
+            for ($k = 0; $k -lt 20; $k++) {
+                Start-Sleep -Milliseconds 250
+                if (-not (Get-Process -Id ([int]$r.pid) -ErrorAction SilentlyContinue)) { break }
+                if ((Get-Content -LiteralPath (Join-Path $RunDir "$Name.run.json") -Raw -ErrorAction SilentlyContinue) -match '"exited":true') { break }
+            }
+        }
+        Say "removed $Name"
+        Remove-Item -LiteralPath (Join-Path $RunDir "$Name.run.json") -Force -ErrorAction SilentlyContinue   # roost-run rewrites it as claude exits
+        if ($r -and (Get-Process -Id ([int]$r.pid) -ErrorAction SilentlyContinue)) { & taskkill /PID ([int]$r.pid) /T /F 2>$null | Out-Null }
+        if ($w) { & psmux kill-window -t $w 2>$null | Out-Null }
+        return
     }
-    if ($Kill) { $w = Get-WinId $Name; if ($w) { & psmux kill-window -t $w 2>$null | Out-Null } }
-    Remove-Item -LiteralPath (Join-Path $SessDir "$Name.json"), (Join-Path $RunDir "$Name.run.json"), (Join-Path $RunDir "$Name.args.json") -Force -ErrorAction SilentlyContinue
     Say "removed $Name"
+}
+
+# the window to jump to: "?" windows first, then "*", cycling on from the current one; $null when nothing waits.
+# $Wins: objects with Id (@N) and Name ("? api"); the glyph in the name is the state (hook + Sync-WinNames).
+function Get-NextWaiting($Wins, [string]$Current) {
+    $ids = @(foreach ($g in '?', '*') { foreach ($w in $Wins) { if ("$($w.Name)".StartsWith("$g ")) { [string]$w.Id } } })
+    if (-not $ids) { return $null }
+    $i = [array]::IndexOf($ids, $Current)
+    if ($i -lt 0) { return $ids[0] }
+    return $ids[($i + 1) % $ids.Count]
+}
+
+# `roost next [SESSION]`: SESSION is passed by the Ctrl+B a binding (run-shell has no $TMUX); typed in a plain terminal
+# it also attaches, like `roost NAME`
+function Invoke-Next([string]$Session) {
+    $s = if ($Session) { $Session } else { $PcSess }
+    $wins = @(foreach ($l in @(& psmux list-windows -t $s -F '#{window_id}|#{window_name}' 2>$null)) {
+            $p = "$l".Split('|', 2); if ($p.Count -eq 2) { [pscustomobject]@{ Id = $p[0]; Name = $p[1] } }
+        })
+    $pick = Get-NextWaiting $wins "$(& psmux display-message -p -t $s '#{window_id}' 2>$null)".Trim()
+    if (-not $pick) {
+        if ($Session -or $env:TMUX) { & psmux display-message -t $s 'roost: nothing waits for you' 2>$null | Out-Null } else { Say 'nothing waits for you' }
+        return
+    }
+    & psmux select-window -t "${s}:$pick" 2>$null | Out-Null
+    if (-not $Session -and -not $env:TMUX) { Invoke-Attach }
 }
 
 function Show-Doctor {
@@ -708,13 +946,18 @@ function Show-Doctor {
     Write-Host ('  ' + (Paint ' roost ' $Badge) + '  ' + (Paint 'doctor' $Dim))
     Write-Host ''
     foreach ($c in 'psmux', 'pwsh', 'claude', 'git') {
-        $g = Get-Command $c -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($g) { Ok $c (Format-Path $g.Source) } else { Bad $c 'not found in PATH' }
+        $n = if ($c -eq 'claude' -and $env:ROOST_CLAUDE_BIN) { $env:ROOST_CLAUDE_BIN } else { $c }
+        $g = Get-Command $n -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($g) { Ok $c (Format-Path $g.Source) } else { Bad $c "$n not found in PATH" }
     }
     $sp = Join-Path $env:USERPROFILE '.claude\settings.json'
-    if ((Test-Path -LiteralPath $sp) -and (Select-String -LiteralPath $sp -Pattern 'roost-hook.ps1' -SimpleMatch -Quiet)) { Ok 'hooks' 'registered in ~\.claude\settings.json' } else { Bad 'hooks' 'missing in ~\.claude\settings.json (run install.ps1)' }
+    $hooks = if (Test-Path -LiteralPath $sp) { Get-Content -LiteralPath $sp -Raw } else { '' }
+    if ($hooks -notmatch 'roost-hook\.ps1') { Bad 'hooks' 'missing in ~\.claude\settings.json (run install.ps1)' }
+    elseif ($hooks -notmatch 'roost-hook\.ps1 resume') { Bad 'hooks' 'PostToolUse hook missing: "?" stays until the next stop (run install.ps1)' }
+    else { Ok 'hooks' 'registered in ~\.claude\settings.json' }
     $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'roost-restore.cmd'
     if (Test-Path -LiteralPath $startup) { Ok 'restore' 'reopens sessions at sign-in (Startup folder)' } else { Bad 'restore' 'restore-at-logon entry missing (run install.ps1)' }
+    if (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\roost\roost.json')) { Info 'terminal' 'Windows Terminal profile "roost" installed' }
     $rows = @(Get-Rows)
     $open = @($rows | Where-Object State -ne 'parked').Count
     Info 'sessions' "$($rows.Count) registered, $open open, $($rows.Count - $open) parked"
@@ -732,14 +975,16 @@ function Show-Help {
         @('roost ls', 'list sessions'),
         @('roost NAME', 'open / switch to a session'),
         @('roost new NAME [DIR] [args]', 'start a session, e.g.  roost new api C:\src\api -c'),
-        @('roost restore [NAME]', 'reopen parked sessions (registered, but no window)'),
-        @('roost close NAME', 'close the window and forget the session'),
+        @('roost restore [NAME]', 'reopen parked sessions (no window) and exited ones'),
+        @('roost close NAME', '/exit the session, close its window and forget it'),
         @('roost forget NAME', 'forget the registry entry only'),
+        @('roost next', 'jump to the next session that waits for you (? first, then *)'),
         @('roost doctor', 'health check'),
         @('roost selftest', 'check the scripts without opening any window')
     )
     $keyRows = @(
         @("$Arrows  Enter  click", 'pick a session on the dashboard (or press its key)'),
+        @('Ctrl+B a', 'next session that waits for you'),
         @('Ctrl+B n / p', 'next / previous window'),
         @('Ctrl+B w', 'list all windows'),
         @('Ctrl+B d', 'detach (sessions keep running)')
@@ -762,11 +1007,15 @@ function Show-Help {
 function Invoke-SelfTest {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('roost-selftest-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-    $saved = @{ H = $env:ROOST_HOME; N = $env:ROOST_NAME; D = $env:ROOST_DRY; C = $script:ClaudeDir }
-    $env:ROOST_HOME = $tmp; $env:ROOST_NAME = 'selftest'; $env:ROOST_DRY = '1'
+    # child processes (hook, `roost new` / `restore`, roost-run.ps1) get the temp home through the environment; the
+    # script-level paths of THIS process still point at the real home, so in-process checks swap them temporarily
+    $saved = @{ H = $env:ROOST_HOME; N = $env:ROOST_NAME; D = $env:ROOST_DRY; S = $env:ROOST_STAGGER; B = $env:ROOST_CLAUDE_BIN; T = $env:ROOST_TITLES
+        C = $script:ClaudeDir; R = $script:RunDir; F = $script:ConnFile }
+    $env:ROOST_HOME = $tmp; $env:ROOST_NAME = 'selftest'; $env:ROOST_DRY = '1'; $env:ROOST_STAGGER = '0'
     $script:fails = 0; $script:checks = 0
     $hook = Join-Path $Here 'roost-hook.ps1'
     $reg = Join-Path $tmp 'sessions\selftest.json'
+    $flag = Join-Path $tmp 'sessions\selftest.ask'
     $check = {
         param($label, $cond)
         $script:checks++
@@ -775,45 +1024,113 @@ function Invoke-SelfTest {
     }
     $call = { param($ev, $json) $json | & pwsh -NoProfile -File $hook $ev }
     $read = { Get-Content -LiteralPath $reg -Raw | ConvertFrom-Json }
+    $json = { param($path) Get-Content -LiteralPath $path -Raw | ConvertFrom-Json }
     Write-Host ''
     Write-Host ('  ' + (Paint ' roost ' $Badge) + '  ' + (Paint 'selftest' $Dim))
     Write-Host ''
     try {
+        foreach ($d in 'sessions', 'run', 'config', 'claude\sessions') { New-Item -ItemType Directory -Force -Path (Join-Path $tmp $d) | Out-Null }
+        # ---- hook
         $j0 = @{ session_id = 'sid-1'; cwd = $tmp; transcript_path = 'x' } | ConvertTo-Json -Compress
-        $o = & $call 'start' $j0
+        $o = & $call 'start' (@{ session_id = 'sid-1'; cwd = $tmp; transcript_path = 'x'; permission_mode = 'plan' } | ConvertTo-Json -Compress)
         & $check 'hook is silent on stdout' (-not $o)
         & $check 'start registers the session' (Test-Path -LiteralPath $reg)
         $r = & $read; & $check 'start -> idle' (($r.state -eq 'idle') -and ($r.display -eq 'idle'))
+        & $check 'permission mode is recorded' ($r.permission_mode -eq 'plan')
         & $call 'busy' $j0 | Out-Null
         $r = & $read; & $check 'busy' (($r.state -eq 'busy') -and ($r.display -eq 'busy'))
+        & $check 'an event without permission_mode keeps the last one' ($r.permission_mode -eq 'plan')
         & $call 'attention' '{"session_id":"sid-1","notification_type":"permission_prompt"}' | Out-Null
-        $r = & $read; & $check 'permission prompt -> ? (state stays busy)' (($r.display -eq 'attention') -and ($r.state -eq 'busy'))
+        $r = & $read; & $check 'permission prompt -> ? (state stays busy), "?" flag set' (($r.display -eq 'attention') -and ($r.state -eq 'busy') -and (Test-Path -LiteralPath $flag))
+        & $call 'resume' $j0 | Out-Null
+        $r = & $read; & $check 'PostToolUse after the prompt -> busy, flag cleared' (($r.display -eq 'busy') -and -not (Test-Path -LiteralPath $flag))
+        & $call 'attention' '{"session_id":"sid-1","notification_type":"permission_prompt"}' | Out-Null
         & $call 'idle' $j0 | Out-Null
-        $r = & $read; & $check 'stop -> * waiting, state idle' (($r.display -eq 'waiting') -and ($r.state -eq 'idle'))
+        $r = & $read; & $check 'stop -> * waiting, state idle, flag cleared' (($r.display -eq 'waiting') -and ($r.state -eq 'idle') -and -not (Test-Path -LiteralPath $flag))
+        & $call 'resume' $j0 | Out-Null
+        $r = & $read; & $check 'PostToolUse does nothing unless "?"' ($r.display -eq 'waiting')
         & $call 'end' '{"reason":"other"}' | Out-Null
         & $check 'end(other) keeps the entry' (Test-Path -LiteralPath $reg)
         & $call 'end' '{"reason":"prompt_input_exit"}' | Out-Null
         & $check '/exit forgets the entry' (-not (Test-Path -LiteralPath $reg))
+        # ---- new / restore (dry run: the psmux command is printed, run\NAME.args.json is what roost-run.ps1 would get)
         $out = (& pwsh -NoProfile -File $Self new selftab $tmp -c | Out-String)
         & $check 'new prints a psmux command (dry run)' ($out -match 'new-window.* -n selftab')
         $af = Join-Path $tmp 'run\selftab.args.json'
         & $check 'extra args are passed on (-c)' ((Test-Path -LiteralPath $af) -and ((Get-Content -LiteralPath $af -Raw) -match '"-c"'))
+        Set-Content -LiteralPath (Join-Path $tmp 'config\resume-prompt.txt') -Value 'please continue'
+        Set-Content -LiteralPath (Join-Path $tmp 'config\connectors-allow') -Value 'someone-else'
+        Set-Content -LiteralPath (Join-Path $tmp 'tr.jsonl') -Value '{}'
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        @{ name = 'r-busy'; cwd = $tmp; session_id = 'sid-b'; transcript = (Join-Path $tmp 'tr.jsonl'); state = 'busy'; display = 'busy'; permission_mode = 'plan'; connectors = $true; updated = $now } |
+            ConvertTo-Json -Compress | Set-Content (Join-Path $tmp 'sessions\r-busy.json')
+        @{ name = 'r-idle'; cwd = $tmp; session_id = 'sid-i'; transcript = (Join-Path $tmp 'tr.jsonl'); state = 'idle'; display = 'waiting'; permission_mode = 'bypassPermissions'; connectors = $false; updated = $now } |
+            ConvertTo-Json -Compress | Set-Content (Join-Path $tmp 'sessions\r-idle.json')
+        & pwsh -NoProfile -File $Self restore 6>$null | Out-Null
+        $b = & $json (Join-Path $tmp 'run\r-busy.args.json'); $i = & $json (Join-Path $tmp 'run\r-idle.args.json')
+        & $check 'restore: --resume id, and the continue prompt for a busy session' (($b.sid -eq 'sid-b') -and ($b.prompt -eq 'please continue'))
+        & $check 'restore: no prompt for an idle session' (($i.sid -eq 'sid-i') -and -not $i.prompt)
+        & $check 'restore: the permission mode comes back (never bypassPermissions)' ((($b.extra -join ' ') -eq '--permission-mode plan') -and -not $i.extra)
+        & $check 'restore: connectors as recorded / as connectors-allow says' (($b.conn -eq $true) -and ($i.conn -eq $false))
+        # ---- roost-run.ps1 for real, with a fake claude that logs what it got
+        $fake = Join-Path $tmp 'fake-claude.ps1'
+        Set-Content -LiteralPath $fake -Value ('Set-Content -LiteralPath (Join-Path $env:ROOST_HOME "fake.log") -Value @(("ARGS " + ($args -join " ")), ' +
+            '("MCP=" + $env:ENABLE_CLAUDEAI_MCP_SERVERS), ("NAME=" + $env:ROOST_NAME), ("LEAK=" + $env:CLAUDECODE + $env:CLAUDE_CODE_SESSION_ID))')
+        Set-Content -LiteralPath (Join-Path $tmp 'config\claude-flags') -Value '--permission-mode auto --verbose'
+        @{ sid = 'sid-9'; prompt = 'go on'; extra = @('--permission-mode', 'plan'); conn = $false } | ConvertTo-Json -Compress | Set-Content (Join-Path $tmp 'run\runtest.args.json')
+        # as if this psmux session had been created from a Claude Code tool shell
+        $cc = @{ C = $env:CLAUDECODE; S = $env:CLAUDE_CODE_SESSION_ID }
+        $env:ROOST_CLAUDE_BIN = $fake; $env:ROOST_TITLES = '0'; $env:CLAUDECODE = '1'; $env:CLAUDE_CODE_SESSION_ID = 'other-session'
+        & pwsh -NoProfile -File $Runner runtest | Out-Null
+        $env:ROOST_CLAUDE_BIN = $saved.B; $env:ROOST_TITLES = $saved.T; $env:CLAUDECODE = $cc.C; $env:CLAUDE_CODE_SESSION_ID = $cc.S
+        $log = Get-Content -LiteralPath (Join-Path $tmp 'fake.log') -ErrorAction SilentlyContinue
+        & $check 'run: flags + --resume id + extra args + prompt, in that order' ($log -contains 'ARGS --verbose --resume sid-9 --permission-mode plan go on')
+        & $check 'run: claude.ai connectors off unless allowed; ROOST_NAME set' (($log -contains 'MCP=false') -and ($log -contains 'NAME=runtest'))
+        & $check "run: a Claude Code shell's CLAUDECODE / session id never reach claude" ($log -contains 'LEAK=')
+        & $check 'run: marks the window "exited" when claude quits' ((& $json (Join-Path $tmp 'run\runtest.run.json')).exited -eq $true)
+        # ---- in-process logic
+        $script:RunDir = Join-Path $tmp 'run'
+        $st = (Get-Process -Id $PID).StartTime.ToFileTimeUtc()
+        @{ pid = $PID; start = $st } | ConvertTo-Json -Compress | Set-Content (Join-Path $tmp 'run\live.run.json')
+        @{ pid = $PID; start = $st; exited = $true } | ConvertTo-Json -Compress | Set-Content (Join-Path $tmp 'run\gone.run.json')
+        @{ pid = $PID; start = 1 } | ConvertTo-Json -Compress | Set-Content (Join-Path $tmp 'run\reused.run.json')
+        & $check 'run state: open / exited (window stayed, claude quit) / reused pid' (((Get-RunState 'live') -eq 'open') -and ((Get-RunState 'gone') -eq 'exited') -and ((Get-RunState 'reused') -eq 'none'))
+        & $check 'an exited session shows as "exited" and is not alive' (((Get-StateKey ([pscustomobject]@{ display = 'busy' }) 'exited') -eq 'shell') -and -not (Test-Alive 'gone'))
+        $w = @([pscustomobject]@{ Id = '@1'; Name = 'dash' }, [pscustomobject]@{ Id = '@2'; Name = '* b' }, [pscustomobject]@{ Id = '@3'; Name = '? a' },
+            [pscustomobject]@{ Id = '@4'; Name = "$Dot c" }, [pscustomobject]@{ Id = '@5'; Name = '? d' })
+        & $check 'next: "?" first, then "*", cycling' (((Get-NextWaiting $w '@1') -eq '@3') -and ((Get-NextWaiting $w '@3') -eq '@5') -and
+            ((Get-NextWaiting $w '@5') -eq '@2') -and ((Get-NextWaiting $w '@2') -eq '@3') -and ($null -eq (Get-NextWaiting @($w[0], $w[3]) '@1')))
+        $tr = Join-Path $tmp 'transcript.jsonl'
+        $big = 'x' * 100000   # the last entry is larger than the first tail read
+        @('{"type":"user","message":{"content":"hi"}}',
+            (@{ type = 'assistant'; message = @{ model = 'claude-opus-5-5'; content = $big }; effort = 'max'; advisorModel = 'claude-opus-5-5' } | ConvertTo-Json -Compress),
+            (@{ type = 'assistant'; isSidechain = $true; message = @{ model = 'claude-haiku-5-5' }; effort = 'low' } | ConvertTo-Json -Compress)) | Set-Content -LiteralPath $tr
+        $ti = Get-TranscriptInfo $tr
+        & $check 'model / effort / advisor from the transcript (subagent entries skipped)' (($ti.Model -eq 'opus 5.5') -and ($ti.Effort -eq 'max') -and ($ti.Advisor -eq 'opus 5.5'))
+        & $check 'model names: claude-3-5-sonnet-20241022 -> sonnet 3.5, claude-fable-5-1 -> fable 5.1' (((Format-Model 'claude-3-5-sonnet-20241022') -eq 'sonnet 3.5') -and ((Format-Model 'claude-fable-5-1') -eq 'fable 5.1'))
         $compiled = try { if (-not ('RoostDashInput' -as [type])) { Add-Type -TypeDefinition $DashInputSrc }; $true } catch { $false }
         & $check 'dashboard mouse input compiles' $compiled
         # Remote Control state from Claude Code's per-process files (fake ones for this process, plus a stale one)
         $cs = Join-Path $tmp 'claude\sessions'
-        New-Item -ItemType Directory -Force -Path $cs | Out-Null
-        $st = (Get-Process -Id $PID).StartTime.ToFileTimeUtc()
         @{ pid = $PID; procStart = $st; sessionId = 'sid-on'; bridgeSessionId = 'session_x' } | ConvertTo-Json | Set-Content (Join-Path $cs 'a.json')
         @{ pid = $PID; procStart = $st; sessionId = 'sid-off'; bridgeSessionId = '' } | ConvertTo-Json | Set-Content (Join-Path $cs 'b.json')
         @{ pid = $PID; procStart = 1; sessionId = 'sid-stale'; bridgeSessionId = 'session_y' } | ConvertTo-Json | Set-Content (Join-Path $cs 'c.json')
         $script:ClaudeDir = Join-Path $tmp 'claude'
         $rc = Get-RcIndex
         & $check 'Remote Control: on / off / stale pid ignored' (($rc['sid-on'] -eq 'on') -and ($rc['sid-off'] -eq 'off') -and -not $rc.ContainsKey('sid-stale'))
+        # before its first answer a session shows what it is configured to use: launch flags over settings
+        '{"model":"opus","effortLevel":"xhigh","advisorModel":"opus"}' | Set-Content (Join-Path $tmp 'claude\settings.json')
+        @{ sid = ''; extra = @('--model', 'claude-sonnet-5-5', '--effort', 'low') } | ConvertTo-Json -Compress | Set-Content (Join-Path $tmp 'run\cfgtest.args.json')
+        $ci = Get-ConfiguredInfo 'cfgtest' $tmp; $cd = Get-ConfiguredInfo 'noflags' $tmp
+        & $check 'configured model / effort / advisor: launch flags over settings' (($ci.Model -eq 'sonnet 5.5') -and ($ci.Effort -eq 'low') -and ($ci.Advisor -eq 'opus') -and
+            ($cd.Model -eq 'opus') -and ($cd.Effort -eq 'xhigh') -and $ci.Configured)
         & $check 'psmux is installed' ([bool](Get-Command psmux -ErrorAction SilentlyContinue))
-        & $check 'claude is installed' ([bool](Get-Command claude -ErrorAction SilentlyContinue))
+        $cb = if ($saved.B) { $saved.B } else { 'claude' }
+        & $check 'claude is installed' ([bool](Get-Command $cb -ErrorAction SilentlyContinue))
     } finally {
-        $env:ROOST_HOME = $saved.H; $env:ROOST_NAME = $saved.N; $env:ROOST_DRY = $saved.D; $script:ClaudeDir = $saved.C
+        $env:ROOST_HOME = $saved.H; $env:ROOST_NAME = $saved.N; $env:ROOST_DRY = $saved.D; $env:ROOST_STAGGER = $saved.S
+        $env:ROOST_CLAUDE_BIN = $saved.B; $env:ROOST_TITLES = $saved.T
+        $script:ClaudeDir = $saved.C; $script:RunDir = $saved.R; $script:ConnFile = $saved.F
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
     Write-Host ''
@@ -842,6 +1159,7 @@ try {
         }
         'close' { Remove-Session ([string]$rest[0]) $true }
         'forget' { Remove-Session ([string]$rest[0]) $false }
+        'next' { Invoke-Next ([string]$rest[0]) }
         'doctor' { Show-Doctor }
         'selftest' { Invoke-SelfTest }
         { $_ -in 'help', '-h', '--help' } { Show-Help }

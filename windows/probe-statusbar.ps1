@@ -123,7 +123,8 @@ public static class ProbeScreen {
             Put(ch); i++;
         }
     }
-    static void Put(char ch) { if (cc > Cols - 1) return; G[cr, cc] = ch; S[cr, cc] = Style(); cc++; }
+    // after the last column the cursor waits; the next character wraps to the next row (renderers rely on autowrap)
+    static void Put(char ch) { if (cc >= Cols) { cc = 0; if (cr < Rows - 1) cr++; } G[cr, cc] = ch; S[cr, cc] = Style(); cc++; }
     public static string Row(int r) { var sb = new StringBuilder(); for (int c = 0; c < Cols; c++) sb.Append(G[r, c]); return sb.ToString(); }
     public static string Runs(int r) {
         var sb = new StringBuilder(); int s = 0; string row = Row(r);

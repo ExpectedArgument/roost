@@ -19,7 +19,9 @@ directory, so open the one for the port you are changing before you test it.
 
 There is no build, lint or test framework. Don't invent one. What exists:
 
-- **Windows:** `pwsh -NoProfile -File windows\roost.ps1 selftest` (temp `ROOST_HOME`, `ROOST_DRY=1`, no windows open).
+- **Windows:** `pwsh -NoProfile -File windows\roost.ps1 selftest`. It uses a temp `ROOST_HOME` and `ROOST_DRY=1`, opens
+  no windows, and runs `roost-run.ps1` with a fake claude through `ROOST_CLAUDE_BIN`. `windows/CLAUDE.md` describes a
+  psmux end-to-end recipe.
 - **Linux:** `linux/bin/roost selftest` (own tmux socket, state and a fake `claude`; touches nothing real), plus
   `roost doctor` for the installed setup. Read the safety notes in `linux/CLAUDE.md` before running the hook by hand.
 
@@ -48,13 +50,17 @@ touch `~/.claude/settings.json` only when a hook is missing, after backing it up
    - `Stop` → `idle`
    - `Notification` → `attention`
    - `SessionEnd` → `end`
-   - Linux only: `PostToolUse` → `resume`
+   - `PostToolUse` → `resume`. It clears `?` once a prompt is answered and does nothing otherwise. Windows runs it
+     async, behind a cheap bash check, because pwsh is slow to start.
 2. The hook writes the registry entry `sessions/NAME.json` atomically (tmp file, then move).
-   - Both ports store name, cwd, session_id, transcript, `state` and `updated`.
-   - Windows also stores `display`.
-   - Linux also stores `permission_mode` and `connectors`. It keeps the display state only in the tmux window option
-     `@roost_state`, not in the file.
+   - Both ports store name, cwd, session_id, transcript, `state`, `permission_mode`, `connectors` and `updated`.
+     `restore` reapplies the permission mode (never `bypassPermissions`) and the connectors.
+   - Not every event carries `permission_mode`. Windows keeps the last value seen; Linux writes `auto` when it is
+     missing.
+   - Windows also stores `display`. Linux keeps the display state only in the tmux window option `@roost_state`.
 3. The main script (`linux/bin/roost` / `windows/roost.ps1`) reads the registry for `ls`, the dashboard and `restore`.
+   - A window whose claude quit, leaving a plain shell, shows as `SHELL` (Linux) or `✗ exited` (Windows).
+   - `restore` reopens it, like a parked session.
 
 ### The two state values
 
@@ -82,6 +88,22 @@ kill or a reboot keeps it, so the session is "parked" and comes back with `roost
     holds the connection.
 - The terminal tab title is `🐦 roost`, plus `?N` / `*N` for the sessions that need you or wait for you. Windows pushes
   it from the dash. Linux has tmux call `roost title` through `set-titles-string`.
+
+### Model, effort and advisor columns (Windows; not on Linux yet)
+
+- The Windows dashboard and `roost ls` show MODEL, EFFORT and ADVISOR per session (`opus 5.5`, `max`, `opus 5.5`).
+- Hooks are no source for these: `model` arrives only on some SessionStarts, `effort` only on tool-context events,
+  and the advisor never.
+- The source is the session's transcript (registry `transcript`). Read the **last main-thread assistant entry**,
+  `"type":"assistant"` without `isSidechain`, and take its top-level fields:
+  - `message.model` (`claude-opus-5-5`)
+  - `effort` (`low`, `medium`, `high`, `xhigh` or `max`)
+  - `advisorModel` (empty when the advisor is off)
+- These follow `/model`, `/effort` and `/advisor` changes.
+- It is an internal format, so the rules are:
+  - Read only the end of the file. Transcripts reach megabytes, and one entry can be large.
+  - Cache the result until the file changes.
+  - Fail soft: empty cells.
 
 ### Hook invariants (both ports)
 

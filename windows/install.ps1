@@ -25,6 +25,8 @@ $pf = Join-Path $cfg 'resume-prompt.txt'
 if (-not (Test-Path -LiteralPath $pf)) { Copy-Item -LiteralPath (Join-Path $src 'resume-prompt.txt') -Destination $pf }
 $ff = Join-Path $cfg 'claude-flags'
 if (-not (Test-Path -LiteralPath $ff)) { Set-Content -LiteralPath $ff -Value '--permission-mode auto' }
+$ca = Join-Path $cfg 'connectors-allow'   # sessions (or *) that keep claude.ai connectors on
+if (-not (Test-Path -LiteralPath $ca)) { Set-Content -LiteralPath $ca -Value '*' }
 Step "config in $cfg (existing files kept)"
 
 # hooks in ~/.claude/settings.json (existing settings are kept; backup first; untouched when nothing is missing)
@@ -35,16 +37,27 @@ if (Test-Path -LiteralPath $sp) { $s = Get-Content -LiteralPath $sp -Raw | Conve
 $changed = $false
 if (-not $s.ContainsKey('hooks')) { $s['hooks'] = @{}; $changed = $true }
 $hk = ($dst -replace '\\', '/') + '/roost-hook.ps1'
-$events = [ordered]@{ SessionStart = 'start'; UserPromptSubmit = 'busy'; Stop = 'idle'; Notification = 'attention'; SessionEnd = 'end' }
+$events = [ordered]@{ SessionStart = 'start'; UserPromptSubmit = 'busy'; Stop = 'idle'; Notification = 'attention'; SessionEnd = 'end'; PostToolUse = 'resume' }
+# PostToolUse fires after every tool call, and pwsh takes ~0.2 s to start. So it runs in the background (async) and,
+# where hooks run in Git Bash (Claude Code's default on Windows), pwsh starts only while the session shows "?"
+# (roost-hook.ps1 keeps sessions\NAME.ask for that); the check alone takes ~30 ms.
+$gitBash = @($env:CLAUDE_CODE_GIT_BASH_PATH, "$env:ProgramFiles\Git\bin\bash.exe", "${env:ProgramFiles(x86)}\Git\bin\bash.exe",
+    "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe") | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
 foreach ($ev in $events.Keys) {
-    $cmd = "pwsh -NoProfile -File $hk $($events[$ev])"
     $list = @()
     if ($s['hooks'].ContainsKey($ev)) { $list = @($s['hooks'][$ev]) }
     $has = $false
     foreach ($g in $list) { foreach ($h in @($g.hooks)) { if ("$($h.command)" -match 'roost-hook\.ps1') { $has = $true } } }
     if (-not $has) {
-        $timeout = if ($ev -eq 'SessionEnd') { 3 } else { 10 }
-        $list += @{ hooks = @(@{ type = 'command'; command = $cmd; timeout = $timeout }) }
+        $entry = [ordered]@{ type = 'command'; command = "pwsh -NoProfile -File $hk $($events[$ev])"; timeout = $(if ($ev -eq 'SessionEnd') { 3 } else { 10 }) }
+        if ($ev -eq 'PostToolUse') {
+            $entry['async'] = $true
+            if ($gitBash) {
+                $entry['shell'] = 'bash'
+                $entry['command'] = 'f="${ROOST_HOME:-$LOCALAPPDATA/roost}/sessions/$ROOST_NAME.ask"; [ -n "$ROOST_NAME" ] && [ -e "$f" ] && exec pwsh -NoProfile -File ' + $hk + ' resume; exit 0'
+            }
+        }
+        $list += @{ hooks = @($entry) }
         $changed = $true
     }
     $s['hooks'][$ev] = $list
@@ -104,6 +117,5 @@ Write-Host ('  ' + (Paint 'Done.' '1') + ' Open a NEW PowerShell window, then ru
 Write-Host ('      ' + (Paint 'roost selftest' '38;5;39') + '   ' + (Paint 'roost doctor' '38;5;39') + '   ' + (Paint 'roost new NAME DIR' '38;5;39'))
 Write-Host ''
 
-# UNINSTALL: delete %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\roost-restore.cmd, delete the `roost` function
-# from your profile, delete ~\roost, %LOCALAPPDATA%\roost and %LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\roost,
-# and copy the newest ~\.claude\settings.json.pre-roost-* back over ~\.claude\settings.json.
+# UNINSTALL: pwsh -File windows\uninstall.ps1 (removes roost's hooks, the Startup entry, the profile function, the
+# Windows Terminal profile and ~\roost; keeps %LOCALAPPDATA%\roost and your conversations).

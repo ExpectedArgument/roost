@@ -4,10 +4,25 @@ Port-specific notes. Shared design (hook events, state values, lifecycle, invari
 
 ## Checking changes
 
-- **Selftest:** `pwsh -NoProfile -File windows\roost.ps1 selftest`.
-  - It runs the hook through a full start → busy → attention → idle → end cycle and runs `new` as a dry run.
-  - It works in a temp `ROOST_HOME` with `ROOST_DRY=1`, so no windows open and the real registry is untouched.
+- **Selftest:** `pwsh -NoProfile -File windows\roost.ps1 selftest` (about 30 checks, 15 s).
+  - **Hook:** a full cycle, including permission mode, the `?` flag file and `resume`.
+  - **`new` / `restore`:** run as a dry run; the check reads the `run\NAME.args.json` they write (resume id,
+    continue prompt, permission mode, connectors).
+  - **`roost-run.ps1`:** runs for real with a fake claude (`ROOST_CLAUDE_BIN` pointing to a `.ps1` that logs its args
+    and environment).
+  - **Pure logic:** run state, `next` ordering, transcript model/effort/advisor, the dashboard input type, RC index.
+  - **Isolation:** it works in a temp `ROOST_HOME` with `ROOST_DRY=1`, so no windows open and the real registry is
+    untouched. In-process checks swap the script-level paths (`$RunDir`, `$ClaudeDir`, `$ConnFile`) and restore them.
   - It resolves sibling scripts through `$PSScriptRoot`, so run from the repo it tests the repo copies.
+- **psmux end to end** (new / exited / restore / close / next, with windows): use a separate psmux session on the
+  default server.
+  - Create the session yourself first, `psmux new-session -d -s roosttest -n dash -- cmd.exe /k`, so that no dash
+    runs. A dash's `Set-PcTheme` rebinds `Ctrl+B a` server-wide to the script it runs from.
+  - Set `ROOST_PSMUX_SESSION=roosttest`, a temp `ROOST_HOME` and `ROOST_CLAUDE_BIN=<fake .ps1>`. The fake reads lines
+    and quits on `/exit` or `quit`, so you can test claude quitting and `close`.
+  - Set `TMUX` to any value, so `Switch-To` never tries to attach the test shell. A Claude Code shell running in a
+    background job has no `TMUX`.
+  - Kill `roosttest` afterwards.
 - **Dry run:** set `ROOST_DRY=1` and `roost new …` / `restore` print the psmux command instead of running it.
   `Start-Tab` still writes `run/NAME.args.json` before the dry-run check, so pair it with a temp `ROOST_HOME`, as
   selftest does.
@@ -60,12 +75,57 @@ Port-specific notes. Shared design (hook events, state values, lifecycle, invari
 - psmux window ids (`@N`) are **per psmux session**, not per server. Always target `"<session>:@N"`. `Get-WinId`
   returns that form, and the hook renames with it. A bare `@N` can select, or kill, a window of another psmux session.
 - The display state is stored in the registry `display` field and copied into the window name.
-- Windows does **not** register `PostToolUse`, so `?` clears on the next Stop or UserPromptSubmit, not right after
-  the prompt is answered.
-- `Start-Tab` writes the resume id, prompt and extra args to `run/NAME.args.json` and opens a window running
-  `roost-run.ps1 NAME`, which builds the `claude` argv from that file. This avoids quoting args through psmux.
-- Open vs parked: `roost-run.ps1` writes `run/NAME.run.json` holding its PID and process start time. `Test-Alive`
-  compares both, so a reused PID does not count as open.
+- `Start-Tab` writes the resume id, prompt, extra args and connectors flag to `run/NAME.args.json`, then opens a window
+  running `roost-run.ps1 NAME`, which builds the `claude` argv from that file. This avoids quoting args through psmux.
+  - **psmux environment:** `new-session` copies the *caller's* environment into the session, and `new-window` (and
+    `respawn-pane`) use that *session* environment, not the caller's.
+  - A window opened later therefore does not see the overrides of whoever runs `roost new`. They are handed over
+    explicitly: `ROOST_HOME` as `roost-run.ps1 -RoostHome`, and `ROOST_CLAUDE_BIN` / `ROOST_PSMUX_SESSION` as `bin` /
+    `mux` in `args.json`.
+  - A session created from a **Claude Code tool shell** would carry that shell's variables into every window.
+    - `CLAUDECODE=1` makes claude refuse to start as a nested session.
+    - `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID` and `CLAUDE_CODE_MESSAGING_*` belong to the caller.
+    - `NO_COLOR=1` strips the dash's colours.
+    - Only when `CLAUDECODE` is set, `Clear-ClaudeShellEnv` drops these (`$ClaudeShellVars`) before `new-session`, and
+      `roost-run.ps1` drops them again before it starts claude.
+    - User settings such as `CLAUDE_CODE_GIT_BASH_PATH` are kept, and so is the user's own `NO_COLOR` in a normal
+      shell.
+- Run state (`Get-RunState`) comes from `run/NAME.run.json`, which `roost-run.ps1` writes:
+  - `open`: the window's shell is alive (pid and start time match, so a reused pid does not count) and claude runs in
+    it.
+  - `exited`: claude quit and the window stayed as a plain shell. `roost-run.ps1` adds `"exited": true` after claude
+    returns. The dashboard shows `✗ exited` (state key `shell`, Linux's SHELL), and `Sync-WinNames` gives the window
+    its bare name.
+  - `none`: no window.
+  - `Test-Alive` means `open`, so `restore`, `roost NAME` and a dashboard click reopen both parked and exited sessions.
+- `Start-Tab` creates the new window **before** killing a stale one of the same name, because the command may run
+  inside it (`roost NAME` typed in an exited session's shell). When `$env:TMUX_PANE` is that window's pane, it selects
+  the new window first. `Get-WinId NAME -Not <target>` finds the other one.
+- `roost close` works in this order:
+  1. It removes the registry and run files first, for the same reason.
+  2. Then it sends `Escape`, which cancels a pending `?` prompt instead of answering it, then `/exit` and Enter.
+  3. It waits up to 5 s for claude to quit.
+  4. Then it removes `run.json` again (roost-run rewrites it), runs `taskkill /T /F` on the roost-run pid if it is
+     still alive, and kills the window.
+- `roost next [SESSION]` (`Get-NextWaiting`) picks `?` windows first, then `*`, cycling on from the session's current
+  window. The glyph in the window name is the state.
+  - `Set-PcTheme` binds `Ctrl+B a` server-wide: `bind-key a run-shell -b "pwsh … next #{session_name}"`.
+  - `run-shell` runs without `$TMUX`, so the session argument also means "do not attach". `roost next` typed in a
+    plain terminal selects the window and then attaches.
+- Permission mode and connectors:
+  - The hook keeps the last `permission_mode` seen, because not every event carries it.
+  - `restore` passes it as `--permission-mode` (default, acceptEdits, plan, auto, dontAsk; never bypassPermissions,
+    as on Linux). `roost-run.ps1` lets an explicit `--permission-mode` replace the one in `claude-flags`.
+  - Connectors stay on when `roost new --connectors` asked for them, or when `config\connectors-allow` (seeded with
+    `*`; a missing file counts as `*`) lists the session.
+  - Otherwise `roost-run.ps1` sets `ENABLE_CLAUDEAI_MCP_SERVERS=false`. When they are on it sets `ROOST_CONN=1`, and
+    the hook records that as `connectors`.
+- `roost new NAME` without DIR uses `$ROOST_PROJECT_ROOT\NAME` (default `~\NAME`) when that folder exists, like Linux.
+- `windows\uninstall.ps1 [-DryRun]` mirrors `linux/uninstall.sh`:
+  - It backs up `settings.json` and removes only the hooks whose command matches `roost-hook`.
+  - It removes the Startup entry and the profile function (backup first), the Windows Terminal fragment and the
+    scripts in `~\roost`.
+  - It keeps `%LOCALAPPDATA%\roost`.
 - The default resume prompt is the repo file `windows/resume-prompt.txt`. `install.ps1` copies it to
   `config\resume-prompt.txt` only if that file is missing, so edits to the repo copy don't reach existing installs.
 - State and config live in `%LOCALAPPDATA%\roost`, overridable with `ROOST_HOME`.
@@ -85,6 +145,29 @@ Port-specific notes. Shared design (hook events, state values, lifecycle, invari
 - A click maps to a row through `$RowY0` (the screen line of the first row) and that frame's `$top` / `$end`.
 - `ROOST_MOUSE=0` only stops asking for the mouse. Keys still go through the reader, because plain
   `[Console]::ReadKey` would see `ESC [ A` as Esc, `[`, `a`.
+
+## PostToolUse (`resume`)
+
+PostToolUse fires after every tool call, and pwsh needs about 0.2 s to start. `install.ps1` therefore registers it
+like this:
+- `"async": true`, so Claude never waits for it.
+- With Git Bash present (Claude Code's default hook shell on Windows), `"shell": "bash"` and a gate: pwsh starts only
+  while `sessions\NAME.ask` exists. The gate takes about 30 ms.
+  - The hook keeps that flag file: it exists exactly while the display state is `attention`.
+  - `resume` turns `?` into busy, and does nothing otherwise.
+  - Because it is async, `resume` re-checks the flag right before writing. A Stop that lands first removes the flag,
+    and then the late `resume` writes nothing.
+- Without Git Bash, it is a plain async `pwsh … resume`.
+
+## Model, effort and advisor columns
+
+- `Get-TranscriptInfo` reads them from the session's transcript (registry `transcript`), not from hooks: hooks carry
+  the model only on some SessionStarts, and the advisor nowhere. See the root `CLAUDE.md`.
+- It reads only the end of the file: 64 KB, then 1 MB, then 8 MB if the last assistant entry is larger. It skips
+  `isSidechain` entries and caches the result per path until size or mtime change.
+- `Format-Model` turns `claude-opus-5-5` into `opus 5.5`.
+- `Get-InfoColumns` drops ADVISOR, then EFFORT, then MODEL when the directory column would get too narrow. That
+  applies to both the dashboard and `roost ls`.
 
 ## RC column and tab title
 
