@@ -13,6 +13,18 @@ Port-specific notes. Shared design (hook events, state values, lifecycle, invari
   selftest does.
 - **psmux probe:** `windows\probe-psmux.ps1` checks which psmux features roost can rely on. It uses a throw-away
   session called `roost-probe`.
+- **Status bar:** `pwsh -File windows\probe-statusbar.ps1 [-Click '0:dash|3:api']` shows the bar as a terminal really
+  draws it.
+  - It copies the live `roost` session's status options and window names into `psmux -L roost-statusprobe`, attaches
+    a client inside a pseudoconsole, and prints the text and style of every run.
+  - With `-Click`, it clicks those labels and prints which window became active.
+  - It only reads the live session.
+  - `display-message -p '#{E:window-status-format}'` is **no** substitute: it expands formats that the status renderer
+    prints raw.
+- Pitfalls when testing from a Claude Code shell (`probe-statusbar.ps1` handles all of them):
+  - Claude Code sets `NO_COLOR=1` in its tool shells, and a psmux client started there draws no colour at all.
+  - `psmux attach` refuses while `PSMUX_SESSION` / `TMUX` are set ("sessions should be nested with care").
+  - psmux's `mouse-down` / `mouse-up` wire commands do not reach status bar clicks.
 - **Dashboard, end to end:** psmux commands run from *inside* a pane always reach the **default** psmux server,
   even when that pane belongs to a `psmux -L <name>` server. A dashboard tested on a `-L` server would therefore act on
   the user's real sessions. Test it instead in a separate session on the default server:
@@ -37,8 +49,12 @@ Port-specific notes. Shared design (hook events, state values, lifecycle, invari
   background job run outside psmux and cannot rename the window.
 - The status bar mirrors `linux/tmux.conf`: it shows only the dash window, the current window and the busy, attention
   and waiting windows, as `3:api ●`.
-  - Inspect a window's rendered piece with `psmux display-message -p -t S:N '#{E:window-status-format}'`.
+  - **psmux 3.4.0 status renderer bug:** a `#{?cond,yes,}` whose false branch is empty, whose true branch has a nested
+    `#{...}`, and whose cond is false is printed raw (the whole format text appears in the bar). Never leave a false
+    branch empty; use a zero-width style such as `#[default]` (`#[bold]` inside the already bold current window).
+  - Clicks on bar labels work with these formats; psmux records the click ranges as it draws.
   - Status strings go through strftime, so a literal `%` must be written `%%`.
+  - `set-option -t <session> status-style` also changes the global value in psmux.
 - In PowerShell strings write `${Dot}?`, not `$Dot?`. `?` is a valid variable-name character, so `"$Dot?"` expands
   the empty variable `Dot?`.
 - psmux window ids (`@N`) are **per psmux session**, not per server. Always target `"<session>:@N"`. `Get-WinId`

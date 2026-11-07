@@ -366,13 +366,17 @@ function Test-PcUp {
 # are hidden, the current window is reversed. psmux has no per-window user options, so the state is the glyph in front
 # of the window name ("● api"), put there by the hook and kept in step by the dash window (Sync-WinNames).
 # Idempotent; only touches the roost session.
+# psmux 3.4.0's status line renderer (not display-message, which expands these fine) prints a window's RAW format
+# when a #{?cond,yes,} has an EMPTY false branch, a nested #{...} in its true branch and cond is false. So no false
+# branch here is empty: a zero-width style (#[default], or #[bold] inside the already bold current window) stands in.
+# Check changes on the real bar with windows\probe-statusbar.ps1.
 function Set-PcTheme {
     $first = '#{=1:window_name}'
     $bare = "#{s/^[${Dot}?*${Ring}] //:window_name}"   # name without the glyph (session names never contain these)
     $busy = "#{==:$first,$Dot}"; $ask = "#{==:$first,?}"; $wait = "#{==:$first,*}"; $idle = "#{==:$first,$Ring}"
     $shown = "#{||:#{==:#{window_name},dash},#{||:$busy,#{||:$ask,$wait}}}"
-    $mark = "#{?$busy,#[fg=colour214] $Dot,#{?$ask,#[fg=colour201]#[bold] ?,#{?$wait,#[fg=colour51] *,}}}"
-    $markCur = "#{?$busy, $Dot,#{?$ask, ?,#{?$wait, *,#{?$idle, $Ring,}}}}"
+    $mark = "#{?$busy,#[fg=colour214] $Dot,#{?$ask,#[fg=colour201]#[bold] ?,#{?$wait,#[fg=colour51] *,#[default]}}}"
+    $markCur = "#{?$busy, $Dot,#{?$ask, ?,#{?$wait, *,#{?$idle, $Ring,#[bold]}}}}"
     $opts = [ordered]@{
         'mouse'                        = 'on'
         'status-interval'              = '2'
@@ -382,7 +386,7 @@ function Set-PcTheme {
         'status-left-length'           = '8'
         'status-right-length'          = '60'          # status-right itself is pushed by the dash window
         'window-status-separator'      = ''
-        'window-status-format'         = "#{?$shown, #I:$bare$mark#[default] ,}"
+        'window-status-format'         = "#{?$shown, #I:$bare$mark#[default] ,#[default]}"
         'window-status-current-format' = "#[reverse]#[bold] #I:$bare$markCur #[default]"
         'pane-border-style'            = 'fg=colour238'
         'pane-active-border-style'     = 'fg=colour39'

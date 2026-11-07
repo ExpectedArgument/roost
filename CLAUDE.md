@@ -22,10 +22,12 @@ There is no build, lint or test framework. Don't invent one. What exists:
 - **Windows:** `pwsh -NoProfile -File windows\roost.ps1 selftest` (temp `ROOST_HOME`, `ROOST_DRY=1`, no windows open).
 - **Linux:** `roost doctor`. `ROOST_TMUX_SOCKET`, `ROOST_STATE_DIR` and `ROOST_CONF_DIR` isolate a test run.
 
-Two hazards when testing by hand (details in `windows/CLAUDE.md`):
+Three hazards when testing by hand (details in `windows/CLAUDE.md`):
 - psmux commands run from *inside* a pane always reach the **default** psmux server, so a dashboard tested on a
   `psmux -L <name>` server acts on the user's real sessions.
 - `roost close` does `taskkill /T /F` on the pid in `run/NAME.run.json`. Never point a fake one at a real process.
+- psmux's status bar renderer prints some formats raw that `display-message` expands fine. Check bar changes with
+  `windows\probe-statusbar.ps1`, which shows the bar as a terminal really draws it.
 
 **Installed copies are separate from the repo.** Edits here take effect only after reinstalling:
 - Windows: `pwsh -File windows\install.ps1` copies the scripts to `~\roost`.
