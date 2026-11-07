@@ -43,14 +43,14 @@ Needs `tmux` (3.2+), `jq`, `claude`. Tested on Ubuntu 24.04 with tmux 3.4.
 ```bash
 git clone https://github.com/ExpectedArgument/roost && cd roost/linux
 ./install.sh              # command + hooks + tmux config
-./install.sh --systemd    # also: start at boot, resume after power loss (needs sudo)
+./install.sh --systemd    # also: start at boot, resume after power loss (needs sudo; takes over at the next boot if tmux already runs)
 roost new api ~/src/api   # first session (add -c to continue the last chat in that directory)
 roost                     # open the dashboard;  Ctrl-b d  detaches;  Ctrl-b w  lists sessions
 roost doctor
 ```
 
 Commands: `roost`, `roost new NAME [DIR] [claude args]`, `roost NAME`, `roost ls`, `roost restore [NAME]`,
-`roost close NAME`, `roost forget NAME`, `roost adopt NAME`, `roost doctor`.
+`roost close NAME`, `roost forget NAME`, `roost adopt NAME`, `roost doctor`, `roost selftest`.
 Remote use: `ssh -t HOST roost`.
 
 Optional hard-stall recovery (hardware watchdog, panic-reboot, NVMe power-state workaround) lives in

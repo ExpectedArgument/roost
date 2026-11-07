@@ -14,6 +14,7 @@
 #   roost status                   one-line summary for the tmux status bar
 #   roost title                    terminal tab title: "🐦 roost" plus the sessions that wait for you (?1 *2)
 #   roost doctor                   health checks (service, hooks, watchdog, sysctl)
+#   roost selftest                 check the scripts in a throw-away tmux server (touches no real session or state)
 #
 # Config: ~/.config/roost/{claude-flags,resume-prompt.txt,connectors-allow}   State: ~/.local/state/roost
 # Registry entries are written by ~/.claude/hooks/roost-hook.sh (SessionStart/UserPromptSubmit/Stop/...).
@@ -429,7 +430,166 @@ cmd_doctor() {
   echo "     / usage: $(df --output=pcent / | tail -1 | tr -d ' ')   (>90% is risky)"
 }
 
-cmd_help() { sed -n '2,18p' "$SELF" | sed 's/^# \{0,1\}//'; }
+# ---- selftest ---------------------------------------------------------------------------------------------------------
+# Runs new / hook / ls / title / restore / close against a throw-away tmux server (own socket) with its own state, config
+# and Claude dir and a fake `claude`. The caller's shell is usually a pane of the REAL server and the hook follows
+# $TMUX / $TMUX_PANE, so those are dropped first and handed to the hook only for the test windows.
+ST_PIDS=(); ST_T=""; ST_SOCK=""; ST_SPATH=""; ST_S=rstest; ST_OK=0; ST_BAD=0
+st_tm() { env -u TMUX -u TMUX_PANE tmux -L "$ST_SOCK" "$@"; }
+st_cleanup() {
+  [ -n "$ST_SOCK" ] && st_tm kill-server 2>/dev/null # never without our own socket name: that would kill the real server
+  case "${ST_SPATH:-}" in */"$ST_SOCK") [ -n "$ST_SOCK" ] && rm -f "$ST_SPATH" ;; esac # kill-server leaves the socket file behind
+  [ "${#ST_PIDS[@]}" -gt 0 ] && kill "${ST_PIDS[@]}" 2>/dev/null
+  [ -n "$ST_T" ] && rm -rf "$ST_T"
+  return 0
+}
+st_roost() {
+  env -u TMUX -u TMUX_PANE ROOST_TMUX_SOCKET="$ST_SOCK" ROOST_TMUX_SESSION="$ST_S" ROOST_STATE_DIR="$ST_T/state" \
+    ROOST_CONF_DIR="$ST_T/conf" CLAUDE_CONFIG_DIR="$ST_T/claude" ROOST_CLAUDE_BIN="$ST_T/bin/claude" \
+    ROOST_PROJECT_ROOT="$ST_T/proj" ROOST_NO_ATTACH=1 ROOST_STAGGER=0 ROOST_AUTOCONTINUE=1 "$SELF" "$@"
+}
+st_wid() { st_tm list-windows -t "$ST_S" -F '#{window_id}|#{@roost_name}' 2>/dev/null | awk -F'|' -v n="$1" '$2==n{print $1; exit}'; }
+st_opt() { st_tm display-message -p -t "$(st_wid "$1")" "#{$2}" 2>/dev/null; }
+st_reg() { jq -r --arg k "$2" '.[$k] // empty' "$ST_T/state/sessions/$1.json" 2>/dev/null; }
+st_row() { st_roost ls | awk -v n="$1" '$1==n{print; exit}'; }
+st_state() { st_row "$1" | cut -c20-26 | tr -d ' '; } # fixed-width columns of `roost ls`
+st_rc() { st_row "$1" | cut -c34-36 | tr -d ' '; }
+st_until() { local i; for i in $(seq 1 75); do "$@" >/dev/null 2>&1 && return 0; sleep 0.2; done; return 1; }
+st_claude() { [ "$(st_opt "$1" pane_current_command)" = claude ]; }
+st_expect() { # DESCRIPTION WANT GOT
+  if [ "$2" = "$3" ]; then printf 'OK   %s\n' "$1"; ST_OK=$((ST_OK + 1)); else printf 'FAIL %s (want %q, got %q)\n' "$1" "$2" "$3"; ST_BAD=$((ST_BAD + 1)); fi
+}
+st_has() { # DESCRIPTION NEEDLE HAYSTACK
+  case "$3" in *"$2"*) st_expect "$1" x x ;; *) st_expect "$1" "…$2…" "$3" ;; esac
+}
+st_hook() { # PANE EVENT [JSON merged into the payload] SESSION: the hook as Claude Code runs it, inside that pane
+  local pane="$1" ev="$2" x="${3:-}" sid="${4:-sid-1111}"
+  [ -n "$x" ] || x='{}'
+  jq -n -c --arg sid "$sid" --arg cwd "$ST_T/proj/${5:-demo}" --arg tp "$ST_T/tr.jsonl" --argjson x "$x" \
+    '{session_id:$sid, cwd:$cwd, transcript_path:$tp, permission_mode:"auto"} + $x' >"$ST_T/in.json"
+  HOUT="$(env TMUX="$ST_SPATH,$ST_SPID,0" TMUX_PANE="$pane" ROOST_STATE_DIR="$ST_T/state" "$ST_HOOK" "$ev" <"$ST_T/in.json" 2>&1)"
+  [ -z "$HOUT" ] && [ "$?" = 0 ] || ST_QUIET=0
+}
+st_ev() { # NAME EVENT [JSON]: hook event for a session window (sid-N from ST_SID)
+  st_hook "$(st_tm display-message -p -t "$(st_wid "$1")" '#{pane_id}')" "$2" "${3:-}" "${ST_SID[$1]}" "$1"
+}
+st_rcfile() { # PID PROCSTART SESSION-ID BRIDGE [extra JSON]: one file of Claude's ~/.claude/sessions
+  local x="${5:-}"; [ -n "$x" ] || x='{}'
+  jq -n -c --argjson pid "$1" --arg ps "$2" --arg sid "$3" --arg br "$4" --argjson x "$x" \
+    '{pid:$pid, procStart:$ps, sessionId:$sid} + (if $br == "" then {} else {bridgeSessionId:$br} end) + $x' >"$ST_T/claude/sessions/$1.json"
+}
+st_regfile() { jq -n -c --arg n "$1" --arg s "$2" --argjson now "$(date +%s)" '{name:$n, cwd:"/", session_id:$s, transcript:"", state:"idle", updated:$now}' >"$ST_T/state/sessions/$1.json"; }
+st_alive() { sleep 600 & ST_PIDS+=("$!"); ST_LAST=$!; }
+
+cmd_selftest() {
+  unset TMUX TMUX_PANE
+  ST_HOOK="$(dirname "$SELF")/../hooks/roost-hook.sh"
+  [ -x "$ST_HOOK" ] || ST_HOOK="$HOME/.claude/hooks/roost-hook.sh"
+  [ -x "$ST_HOOK" ] || die "selftest: roost-hook.sh not found (run it from the repo, or install first)"
+  command -v tmux >/dev/null && command -v jq >/dev/null || die "selftest needs tmux and jq"
+  ST_T="$(mktemp -d)" || die "selftest: no temp dir"
+  ST_SOCK="roost-selftest-$$"; ST_QUIET=1; declare -gA ST_SID=([demo]=sid-1111 [demo2]=sid-2222)
+  trap st_cleanup EXIT
+  mkdir -p "$ST_T"/{state/sessions,claude/sessions,bin,proj/demo,proj/demo2}
+  echo '{}' >"$ST_T/tr.jsonl"
+  # a fake claude: logs its arguments, then shows up as "claude" (tmux reads argv[0]) and idles
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >>"$(dirname "$0")/args.log"' 'exec -a claude sleep 86400' >"$ST_T/bin/claude"
+  chmod +x "$ST_T/bin/claude"
+  env -u TMUX -u TMUX_PANE ROOST_STATE_DIR="$ST_T/state" tmux -L "$ST_SOCK" -f /dev/null new-session -d -s "$ST_S" -n dash 'sleep 86400' 9>&-
+  st_tm has-session -t "$ST_S" || die "selftest: could not start the test tmux server"
+  ST_SPATH="$(st_tm display-message -p '#{socket_path}')"; ST_SPID="$(st_tm display-message -p '#{pid}')"
+  local log="$ST_T/bin/args.log" out sid d
+
+  echo "== new / ls =="
+  st_roost new 'bad name' >/dev/null 2>&1; st_expect "new rejects a name with a space" 1 "$?"
+  st_roost new demo >/dev/null 2>&1
+  st_until st_claude demo
+  st_expect "new: window runs claude" claude "$(st_opt demo pane_current_command)"
+  st_expect "new: window is managed" 1 "$(st_opt demo @roost_managed)"
+  st_expect "new: starts idle" idle "$(st_opt demo @roost_state)"
+  st_has "new: default flags (--permission-mode auto)" "--permission-mode auto" "$(tail -n1 "$log" 2>/dev/null)"
+  st_expect "config defaults are seeded" "--permission-mode auto" "$(cat "$ST_T/conf/claude-flags" 2>/dev/null)"
+  st_expect "ls: IDLE" IDLE "$(st_state demo)"
+
+  echo "== hook cycle (demo) =="
+  st_ev demo start;                                         st_expect "start -> idle" idle "$(st_opt demo @roost_state)"
+  st_expect "start writes the registry" sid-1111 "$(st_reg demo session_id)"
+  st_ev demo busy;                                          st_expect "busy -> busy" busy "$(st_opt demo @roost_state)"
+  st_expect "busy: registry state" busy "$(st_reg demo state)"
+  st_ev demo attention '{"notification_type":"permission_prompt"}'
+  st_expect "permission prompt -> attention" attention "$(st_opt demo @roost_state)"
+  st_expect "attention keeps registry state busy" busy "$(st_reg demo state)"
+  st_ev demo resume;                                        st_expect "PostToolUse after a prompt -> busy" busy "$(st_opt demo @roost_state)"
+  st_ev demo idle;                                          st_expect "Stop -> waiting" waiting "$(st_opt demo @roost_state)"
+  st_expect "Stop: registry state idle" idle "$(st_reg demo state)"
+  st_ev demo resume;                                        st_expect "resume does nothing unless attention" waiting "$(st_opt demo @roost_state)"
+  st_ev demo busy; st_ev demo attention '{"notification_type":"idle_prompt"}'
+  st_expect "idle_prompt -> waiting" waiting "$(st_opt demo @roost_state)"
+  st_ev demo busy; st_ev demo start '{"source":"compact"}'
+  st_expect "compact start keeps the busy state" busy "$(st_reg demo state)"
+  d="$(ls "$ST_T/state/sessions" | wc -l)"
+  st_hook "$(st_tm display-message -p -t "$ST_S:dash" '#{pane_id}')" busy
+  st_expect "hook ignores a window roost does not manage" "$d" "$(ls "$ST_T/state/sessions" | wc -l)"
+  st_expect "hook printed nothing and exited 0 every time" 1 "$ST_QUIET"
+
+  echo "== title / ls states =="
+  st_roost new demo2 >/dev/null 2>&1; st_until st_claude demo2
+  st_ev demo2 start
+  st_expect "title: busy and idle sessions do not count" "🐦 roost" "$(st_roost title)"
+  st_ev demo2 busy; st_ev demo2 idle
+  st_ev demo attention '{"notification_type":"permission_prompt"}'
+  st_expect "title: one asks, one waits" "🐦 roost  ?1 *1" "$(st_roost title)"
+  st_expect "ls: INPUT" INPUT "$(st_state demo)"
+  st_expect "ls: WAIT" WAIT "$(st_state demo2)"
+
+  echo "== parked / shell / restore =="
+  st_tm kill-window -t "$(st_wid demo)"
+  st_expect "closed window -> PARKED, entry kept" PARKED "$(st_state demo)"
+  out="$(st_roost restore demo)"
+  st_has "restore: busy session gets the continue prompt" "resume=yes, continue-prompt=yes" "$out"
+  st_until st_claude demo
+  st_has "restore: claude gets --resume <id>" "--resume sid-1111" "$(tail -n1 "$log")"
+  st_has "restore: ... and the resume prompt" "restarted unexpectedly" "$(tail -n1 "$log")"
+  st_has "restore: nothing to do for a running session" "nothing to restore" "$(st_roost restore demo)"
+  st_tm kill-window -t "$(st_wid demo2)"
+  out="$(st_roost restore demo2)"
+  st_has "restore: idle session gets no prompt" "continue-prompt=no" "$out"
+  st_until st_claude demo2
+  case "$(tail -n1 "$log")" in *unexpectedly*) st_expect "restore: idle session, no prompt in the args" no yes ;; *) st_expect "restore: idle session, no prompt in the args" no no ;; esac
+  pkill -TERM -P "$(st_opt demo2 pane_pid)" # claude exits (a Ctrl-C would also end the wrapper shell: no SHELL window)
+  st_until eval '[ "$(st_opt demo2 pane_current_command)" != claude ]'
+  st_expect "claude exited -> SHELL" SHELL "$(st_state demo2)"
+  st_has "restore recreates a SHELL window" "restored demo2" "$(st_roost restore demo2)"
+  st_until st_claude demo2; st_expect "... and claude runs again" claude "$(st_opt demo2 pane_current_command)"
+
+  echo "== end / close / forget =="
+  st_ev demo2 end '{"reason":"other"}';                     st_expect "SessionEnd other keeps the entry" sid-2222 "$(st_reg demo2 session_id)"
+  st_ev demo2 end '{"reason":"prompt_input_exit"}';         st_expect "SessionEnd /exit forgets the entry" "" "$(st_reg demo2 session_id)"
+  st_roost close demo >/dev/null 2>&1
+  st_expect "close removes window" "" "$(st_wid demo)"
+  st_expect "close removes the entry" "" "$(st_reg demo session_id)"
+  st_regfile gone sid-gone; st_roost forget gone >/dev/null; st_expect "forget removes the entry" "" "$(st_reg gone session_id)"
+
+  echo "== Remote Control column =="
+  st_alive; st_rcfile "$ST_LAST" "$(proc_start "$ST_LAST")" sid-on br-1;  st_regfile rc-on sid-on
+  st_alive; st_rcfile "$ST_LAST" "$(proc_start "$ST_LAST")" sid-off "";   st_regfile rc-off sid-off
+  st_alive; st_rcfile "$ST_LAST" 1 sid-reuse br-1;                         st_regfile rc-reuse sid-reuse
+  sleep 0.1 & d=$!; wait "$d"; st_rcfile "$d" 1 sid-dead br-1;            st_regfile rc-dead sid-dead
+  st_alive; st_rcfile "$ST_LAST" "$(proc_start "$ST_LAST")" sid-job "" '{"parkedJobId":"job-1"}'; st_regfile rc-job sid-job
+  st_alive; st_rcfile "$ST_LAST" "$(proc_start "$ST_LAST")" sid-jobproc br-2 '{"jobId":"job-1"}'
+  st_expect "RC on (bridgeSessionId set)" on "$(st_rc rc-on)"
+  st_expect "RC off (process alive, no bridge)" off "$(st_rc rc-off)"
+  st_expect "RC empty for a reused pid" "" "$(st_rc rc-reuse)"
+  st_expect "RC empty for a dead pid" "" "$(st_rc rc-dead)"
+  st_expect "RC follows a parked job" on "$(st_rc rc-job)"
+
+  echo
+  st_cleanup; ST_T=""; ST_SOCK=""; ST_SPATH=""; trap - EXIT
+  echo "selftest: $ST_OK passed, $ST_BAD failed"
+  [ "$ST_BAD" = 0 ]
+}
+
+cmd_help() { sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 c="${1:-attach}"
 [ $# -gt 0 ] && shift
@@ -445,6 +605,7 @@ case "$c" in
   status) cmd_status "$@" ;;
   title) cmd_title "$@" ;;
   doctor) cmd_doctor "$@" ;;
+  selftest) cmd_selftest "$@" ;;
   help|-h|--help) cmd_help ;;
   *) cmd_attach "$c" "$@" ;; # roost vehicle-ros  ==  roost attach vehicle-ros
 esac

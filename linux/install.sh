@@ -4,7 +4,8 @@
 #   ~/.claude/hooks/roost-hook.sh           state hook for Claude Code
 #   ~/.claude/settings.json                 hooks merged in (backup: settings.json.pre-roost-<time>)
 #   ~/.config/roost/tmux.conf               tmux settings; ~/.tmux.conf gets one `source-file` line
-#   --systemd (needs sudo): /etc/systemd/system/roost-{tmux,restore}.service + loginctl enable-linger
+#   --systemd (needs sudo): /etc/systemd/system/roost-{tmux,restore}.service + loginctl enable-linger;
+#                           started now only if no tmux server runs (else they take over at the next boot)
 # Usage: ./install.sh [--systemd]
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,6 +50,7 @@ if [ -e "$SET" ] && [ "$(jq -S . "$SET")" = "$(jq -S . "$tmp")" ]; then
 else
   if [ -e "$SET" ]; then
     cp -p "$SET" "$SET.pre-roost-$(date +%Y%m%d-%H%M%S)"
+    chmod --reference="$SET" "$tmp" # mktemp creates 0600: keep the file's own mode
     echo "settings.json backed up: $SET.pre-roost-*"
   fi
   mv "$tmp" "$SET"
@@ -63,8 +65,17 @@ if [ "$SYSTEMD" = 1 ]; then
   done
   sudo loginctl enable-linger "$U"
   sudo systemctl daemon-reload
-  sudo systemctl enable --now roost-tmux.service roost-restore.service
-  echo "systemd services enabled: sessions come back after a reboot / power loss"
+  sudo systemctl enable roost-tmux.service roost-restore.service
+  # roost-tmux is Type=forking with ExecStop=tmux kill-server. Started while another tmux server runs (default socket),
+  # its `new-session` succeeds inside that server, the unit's cgroup stays empty, systemd runs ExecStop and every running
+  # session dies. roost-restore Requires roost-tmux, so neither is started then: they take over at the next boot.
+  if env -u TMUX tmux list-sessions >/dev/null 2>&1; then
+    echo "systemd services enabled. A tmux server is already running, so they were NOT started now:"
+    echo "they take over at the next boot, and sessions then come back after a reboot / power loss"
+  else
+    sudo systemctl start roost-tmux.service roost-restore.service
+    echo "systemd services enabled and started: sessions come back after a reboot / power loss"
+  fi
 else
   echo "tip: re-run with --systemd to start sessions at boot and resume them after a power loss"
 fi

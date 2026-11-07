@@ -20,7 +20,8 @@ directory, so open the one for the port you are changing before you test it.
 There is no build, lint or test framework. Don't invent one. What exists:
 
 - **Windows:** `pwsh -NoProfile -File windows\roost.ps1 selftest` (temp `ROOST_HOME`, `ROOST_DRY=1`, no windows open).
-- **Linux:** `roost doctor`. `ROOST_TMUX_SOCKET`, `ROOST_STATE_DIR` and `ROOST_CONF_DIR` isolate a test run.
+- **Linux:** `linux/bin/roost selftest` (own tmux socket, state and a fake `claude`; touches nothing real), plus
+  `roost doctor` for the installed setup. Read the safety notes in `linux/CLAUDE.md` before running the hook by hand.
 
 Three hazards when testing by hand (details in `windows/CLAUDE.md`):
 - psmux commands run from *inside* a pane always reach the **default** psmux server, so a dashboard tested on a
