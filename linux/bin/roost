@@ -14,6 +14,7 @@
 #   roost status                   one-line summary for the tmux status bar
 #   roost title                    terminal tab title: "🐦 roost" plus the sessions that wait for you (?1 *2)
 #   roost doctor                   health checks (service, hooks, watchdog, sysctl)
+#   roost next                     jump to the next session that waits for you (? first, then *); tmux: Ctrl-b a
 #   roost selftest                 check the scripts in a throw-away tmux server (touches no real session or state)
 #
 # Config: ~/.config/roost/{claude-flags,resume-prompt.txt,connectors-allow}   State: ~/.local/state/roost
@@ -363,6 +364,21 @@ cmd_title() { # terminal tab title (tmux set-titles-string): "🐦 roost", plus 
   printf '%s' "$t"
 }
 
+cmd_next() { # jump to the next session that needs you: "?" windows first, then "*", cycling. $1 = tmux session of the caller
+  local sess="${1:-$TS}" cur wid st pass pick i
+  local -a ids=()
+  cur="$(tm display-message -p -t "$sess" '#{window_id}' 2>/dev/null)"
+  for pass in attention waiting; do
+    while IFS='|' read -r wid st; do
+      [ "$st" = "$pass" ] && ids+=("$wid")
+    done < <(tm list-windows -t "$sess" -F '#{window_id}|#{@roost_state}' 2>/dev/null)
+  done
+  if [ "${#ids[@]}" -eq 0 ]; then tm display-message -t "$sess" "roost: nothing waits for you" 2>/dev/null; return 0; fi
+  pick="${ids[0]}"
+  for i in "${!ids[@]}"; do [ "${ids[$i]}" = "$cur" ] && { pick="${ids[$(((i + 1) % ${#ids[@]}))]}"; break; }; done
+  tm select-window -t "$sess:$pick"
+}
+
 cmd_close() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: roost close NAME"
@@ -414,7 +430,10 @@ cmd_doctor() {
   chk "tmux installed ($(tmux -V 2>/dev/null))" "command -v tmux"
   chk "jq installed" "command -v jq"
   chk "tmux session '$TS' is running" "tm has-session -t '$TS'"
-  chk "roost-tmux.service enabled+active" "systemctl is-enabled roost-tmux.service && systemctl is-active roost-tmux.service"
+  if ! systemctl is-enabled roost-tmux.service >/dev/null 2>&1; then echo "$bad roost-tmux.service not enabled (linux/install.sh --systemd)"
+  elif systemctl is-active roost-tmux.service >/dev/null 2>&1; then echo "$ok roost-tmux.service enabled+active"
+  elif tm has-session -t "$TS" 2>/dev/null; then echo "NOTE roost-tmux.service enabled, not active: the running tmux server was started another way; the unit takes over at the next boot"
+  else echo "$bad roost-tmux.service enabled but not active (sudo systemctl start roost-tmux)"; fi
   chk "roost-restore.service enabled" "systemctl is-enabled roost-restore.service"
   chk "linger enabled for $USER" "[ \"\$(loginctl show-user $USER -p Linger --value)\" = yes ]"
   chk "hook script executable" "[ -x $HOME/.claude/hooks/roost-hook.sh ]"
@@ -541,6 +560,10 @@ cmd_selftest() {
   st_expect "title: one asks, one waits" "🐦 roost  ?1 *1" "$(st_roost title)"
   st_expect "ls: INPUT" INPUT "$(st_state demo)"
   st_expect "ls: WAIT" WAIT "$(st_state demo2)"
+  st_tm select-window -t "$ST_S:dash"
+  st_roost next >/dev/null 2>&1; st_expect "next: the window that asks (?) comes first" demo "$(st_tm display-message -p -t "$ST_S" '#{@roost_name}')"
+  st_roost next >/dev/null 2>&1; st_expect "next: then the one that waits (*)" demo2 "$(st_tm display-message -p -t "$ST_S" '#{@roost_name}')"
+  st_roost next >/dev/null 2>&1; st_expect "next: wraps around" demo "$(st_tm display-message -p -t "$ST_S" '#{@roost_name}')"
 
   echo "== parked / shell / restore =="
   st_tm kill-window -t "$(st_wid demo)"
@@ -589,7 +612,7 @@ cmd_selftest() {
   [ "$ST_BAD" = 0 ]
 }
 
-cmd_help() { sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 c="${1:-attach}"
 [ $# -gt 0 ] && shift
@@ -604,6 +627,7 @@ case "$c" in
   click) cmd_click "$@" ;;
   status) cmd_status "$@" ;;
   title) cmd_title "$@" ;;
+  next) cmd_next "$@" ;;
   doctor) cmd_doctor "$@" ;;
   selftest) cmd_selftest "$@" ;;
   help|-h|--help) cmd_help ;;

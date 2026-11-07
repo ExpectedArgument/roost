@@ -31,6 +31,9 @@ guard), `ROOST_NO_ATTACH=1`.
   registry file.
 - Window `dash` runs `watch roost ls --color`. A mouse binding in `tmux.conf` calls `roost click <line>` to jump to a
   session.
+- `roost next` (tmux `Ctrl-b a`) selects the next window whose `@roost_state` is `attention`, then `waiting`, cycling
+  from the caller's current window. The binding passes `#{session_name}` because `attach` makes a grouped
+  `view-PID` session per client, each with its own current window.
 - Open vs parked: a window exists and `pane_current_command` is `claude`. A window left with a plain shell shows as
   `SHELL`, and restore recreates it.
 - The registry also stores `permission_mode` and `connectors`, and restore reapplies them. Sessions not listed in

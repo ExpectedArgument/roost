@@ -20,8 +20,9 @@ after a power cut, a reboot or a dropped SSH connection.
 
 ## What it does
 
-- **One screen for all sessions.** `roost` opens a dashboard; click a session, or pick it with the arrow keys and
-  Enter (Windows: or press its key), to jump to it.
+- **One screen for all sessions.** `roost` opens a dashboard; click a session to jump to it. Windows: or pick it with
+  the arrow keys and Enter, or press its key. Linux: `Ctrl-b w` lists the sessions and `Ctrl-b a` jumps to the next one
+  that waits for you (`?` first, then `*`).
   Only sessions that need you are highlighted in the bottom bar.
 - **Sessions survive.** Close the terminal or lose SSH: they keep running (tmux on Linux, [psmux](https://github.com/psmux/psmux) on Windows).
 - **Automatic resume.** After a reboot every registered session is reopened with `claude --resume`. Sessions that were
@@ -50,7 +51,7 @@ roost doctor
 ```
 
 Commands: `roost`, `roost new NAME [DIR] [claude args]`, `roost NAME`, `roost ls`, `roost restore [NAME]`,
-`roost close NAME`, `roost forget NAME`, `roost adopt NAME`, `roost doctor`, `roost selftest`.
+`roost close NAME`, `roost forget NAME`, `roost adopt NAME`, `roost next`, `roost doctor`, `roost selftest`.
 Remote use: `ssh -t HOST roost`.
 
 Optional hard-stall recovery (hardware watchdog, panic-reboot, NVMe power-state workaround) lives in
