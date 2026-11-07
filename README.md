@@ -165,7 +165,7 @@ sign-in yourself.
 |---|---|
 | `roost` | open the dashboard (attach to the multiplexer session) |
 | `roost new NAME [DIR] [claude args]` | start a session; extra args go to claude (`-c`, `--model sonnet`, …). DIR defaults to `$ROOST_PROJECT_ROOT/NAME` when it exists. `--connectors` keeps claude.ai connectors on |
-| `roost NAME` | switch to a session (Windows: reopens it first if it is parked or exited) |
+| `roost NAME` | switch to a session (reopens it first if it is parked or exited) |
 | `roost ls` | list sessions with state, age, RC, model, effort and advisor |
 | `roost restore [NAME]` | reopen parked and exited sessions |
 | `roost next` | jump to the next session that waits for you (`?` first, then `*`); bound to `Ctrl+B a` |

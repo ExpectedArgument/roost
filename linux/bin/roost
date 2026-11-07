@@ -121,10 +121,22 @@ attach_to() { # $1 = window id or empty
   exec tmux ${ROOST_TMUX_SOCKET:+-L "$ROOST_TMUX_SOCKET"} new-session -t "$TS" -s "view-$$" \; set-option destroy-unattached on "${sel[@]}" 9>&-
 }
 
+# window id of NAME. A parked session, or one whose claude quit and left a plain shell, is resumed first (needs a registry
+# entry); restore runs in a subshell so its lock is gone before an attach replaces this process.
+open_session() {
+  local n="$1" wid
+  wid="$(wid_of "$n")"
+  if [ -e "$SESS_DIR/$n.json" ] && { [ -z "$wid" ] || [ "$(tm display-message -p -t "$wid" '#{pane_current_command}' 2>/dev/null)" != claude ]; }; then
+    (cmd_restore "$n") >/dev/null 2>&1
+    wid="$(wid_of "$n")"
+  fi
+  echo "$wid"
+}
+
 cmd_attach() {
   ensure_server
   local wid=""
-  [ -n "${1:-}" ] && { wid="$(wid_of "$1")"; [ -n "$wid" ] || die "no session named '$1' (roost ls)"; }
+  [ -n "${1:-}" ] && { wid="$(open_session "$1")"; [ -n "$wid" ] || die "no session named '$1' (roost ls)"; }
   if [ -n "${TMUX:-}" ] && [ -z "$wid" ]; then tm choose-tree -Zw; return 0; fi
   attach_to "$wid"
 }
@@ -502,8 +514,7 @@ cmd_click() { # $1 = text of the clicked dash line, $2 = tmux session of the cli
   local n sess="${2:-$TS}" wid
   n="${1#"${1%%[![:space:]]*}"}"; n="${n%% *}"
   valid_name "$n" || return 0
-  wid="$(wid_of "$n")"
-  if [ -z "$wid" ] && [ -e "$SESS_DIR/$n.json" ]; then cmd_restore "$n" >/dev/null 2>&1; wid="$(wid_of "$n")"; fi
+  wid="$(open_session "$n")"
   [ -n "$wid" ] && tm select-window -t "$sess:$wid"
   return 0
 }
@@ -705,6 +716,12 @@ cmd_selftest() {
   st_until eval '[ -n "$(st_wid demo2)" ] && [ "$(st_wid demo2)" != "$old" ]'; st_until st_claude demo2
   st_expect "restore typed in the exited window: a new window runs claude" claude "$(st_opt demo2 pane_current_command)"
   st_expect "... and the old window is gone" "" "$(st_tm list-windows -t "$ST_S" -F '#{window_id}' | grep -Fx "$old")"
+  pkill -TERM -P "$(st_opt demo2 pane_pid)"; st_until eval '[ "$(st_opt demo2 pane_current_command)" != claude ]'
+  st_roost demo2 >/dev/null 2>&1; st_until st_claude demo2
+  st_expect "roost NAME resumes an exited session" claude "$(st_opt demo2 pane_current_command)"
+  st_tm kill-window -t "$(st_wid demo2)"
+  st_roost click "demo2 anything" "$ST_S" >/dev/null 2>&1; st_until st_claude demo2
+  st_expect "a click on a parked session resumes it" claude "$(st_opt demo2 pane_current_command)"
 
   echo "== end / close / forget =="
   st_ev demo2 end '{"reason":"other"}';                     st_expect "SessionEnd other keeps the entry" sid-2222 "$(st_reg demo2 session_id)"

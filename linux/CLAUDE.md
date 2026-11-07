@@ -70,7 +70,9 @@ The shared rules are in the root `CLAUDE.md`. Linux specifics:
   of `launch` drop them, only when `CLAUDECODE` is set (the user's own `NO_COLOR` etc. stay).
 - `launch` hands `ROOST_STATE_DIR` to the window with `-e`, so that window's hook writes where `roost` reads.
 - `restore` creates the new window **before** killing a leftover shell, and kills last: `roost restore NAME` may be
-  typed inside that very shell. `attach_to` closes fd 9, so an attached client does not hold the restore lock.
+  typed inside that very shell. `open_session` (behind `roost NAME` and a dashboard click) resumes a parked or exited
+  session first. It runs `restore` in a subshell, so the lock on fd 9 does not outlive it (an attached client would hold
+  it); `attach_to` also closes fd 9.
 - `close` removes the registry entry first and again after the kill, because a hook may rewrite it while claude exits.
   It sends Escape (cancels a pending `?` prompt), pauses 0.3 s so it is not read as Alt+/, then `/exit`.
 
