@@ -1,0 +1,392 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="349" viewBox="0 0 960 349" role="img" aria-label="roost dashboard and status bar">
+<rect width="960" height="349" rx="10" fill="#0c0c0c"/>
+<rect width="960" height="34" rx="10" fill="#1f1f1f"/><rect y="24" width="960" height="10" fill="#1f1f1f"/>
+<circle cx="22" cy="17" r="6" fill="#ff5f57"/>
+<circle cx="42" cy="17" r="6" fill="#febc2e"/>
+<circle cx="62" cy="17" r="6" fill="#28c840"/>
+<text x="480" y="22" fill="#bdbdbd" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="13" text-anchor="middle">🐦&#160;roost&#160;&#160;?1&#160;*1</text>
+<g font-family="'Cascadia Mono','Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace" font-size="14" xml:space="preserve" style="white-space:pre">
+<rect x="18" y="47" width="59.4" height="19" fill="#00afff"/>
+<text x="26.4" y="62" fill="#000000" font-weight="700">roost</text>
+<text x="93.6" y="62" fill="#8a8a8a">Claude</text>
+<text x="152.4" y="62" fill="#8a8a8a">Code</text>
+<text x="194.4" y="62" fill="#8a8a8a">sessions</text>
+<text x="614.4" y="62" fill="#ffaf00">●</text>
+<text x="631.2" y="62" fill="#ffaf00">1</text>
+<text x="656.4" y="62" fill="#ff00ff" font-weight="700">?</text>
+<text x="673.2" y="62" fill="#ff00ff" font-weight="700">1</text>
+<text x="698.4" y="62" fill="#00ffff">*</text>
+<text x="715.2" y="62" fill="#00ffff">1</text>
+<text x="740.4" y="62" fill="#00d700">○</text>
+<text x="757.2" y="62" fill="#00d700">1</text>
+<text x="782.4" y="62" fill="#00afff">⏸</text>
+<text x="799.2" y="62" fill="#00afff">1</text>
+<text x="824.4" y="62" fill="#ff0000">✗</text>
+<text x="841.2" y="62" fill="#ff0000">1</text>
+<text x="883.2" y="62" fill="#8a8a8a">22:12</text>
+<text x="18" y="81" fill="#444444">─</text>
+<text x="26.4" y="81" fill="#444444">─</text>
+<text x="34.8" y="81" fill="#444444">─</text>
+<text x="43.2" y="81" fill="#444444">─</text>
+<text x="51.6" y="81" fill="#444444">─</text>
+<text x="60" y="81" fill="#444444">─</text>
+<text x="68.4" y="81" fill="#444444">─</text>
+<text x="76.8" y="81" fill="#444444">─</text>
+<text x="85.2" y="81" fill="#444444">─</text>
+<text x="93.6" y="81" fill="#444444">─</text>
+<text x="102" y="81" fill="#444444">─</text>
+<text x="110.4" y="81" fill="#444444">─</text>
+<text x="118.8" y="81" fill="#444444">─</text>
+<text x="127.2" y="81" fill="#444444">─</text>
+<text x="135.6" y="81" fill="#444444">─</text>
+<text x="144" y="81" fill="#444444">─</text>
+<text x="152.4" y="81" fill="#444444">─</text>
+<text x="160.8" y="81" fill="#444444">─</text>
+<text x="169.2" y="81" fill="#444444">─</text>
+<text x="177.6" y="81" fill="#444444">─</text>
+<text x="186" y="81" fill="#444444">─</text>
+<text x="194.4" y="81" fill="#444444">─</text>
+<text x="202.8" y="81" fill="#444444">─</text>
+<text x="211.2" y="81" fill="#444444">─</text>
+<text x="219.6" y="81" fill="#444444">─</text>
+<text x="228" y="81" fill="#444444">─</text>
+<text x="236.4" y="81" fill="#444444">─</text>
+<text x="244.8" y="81" fill="#444444">─</text>
+<text x="253.2" y="81" fill="#444444">─</text>
+<text x="261.6" y="81" fill="#444444">─</text>
+<text x="270" y="81" fill="#444444">─</text>
+<text x="278.4" y="81" fill="#444444">─</text>
+<text x="286.8" y="81" fill="#444444">─</text>
+<text x="295.2" y="81" fill="#444444">─</text>
+<text x="303.6" y="81" fill="#444444">─</text>
+<text x="312" y="81" fill="#444444">─</text>
+<text x="320.4" y="81" fill="#444444">─</text>
+<text x="328.8" y="81" fill="#444444">─</text>
+<text x="337.2" y="81" fill="#444444">─</text>
+<text x="345.6" y="81" fill="#444444">─</text>
+<text x="354" y="81" fill="#444444">─</text>
+<text x="362.4" y="81" fill="#444444">─</text>
+<text x="370.8" y="81" fill="#444444">─</text>
+<text x="379.2" y="81" fill="#444444">─</text>
+<text x="387.6" y="81" fill="#444444">─</text>
+<text x="396" y="81" fill="#444444">─</text>
+<text x="404.4" y="81" fill="#444444">─</text>
+<text x="412.8" y="81" fill="#444444">─</text>
+<text x="421.2" y="81" fill="#444444">─</text>
+<text x="429.6" y="81" fill="#444444">─</text>
+<text x="438" y="81" fill="#444444">─</text>
+<text x="446.4" y="81" fill="#444444">─</text>
+<text x="454.8" y="81" fill="#444444">─</text>
+<text x="463.2" y="81" fill="#444444">─</text>
+<text x="471.6" y="81" fill="#444444">─</text>
+<text x="480" y="81" fill="#444444">─</text>
+<text x="488.4" y="81" fill="#444444">─</text>
+<text x="496.8" y="81" fill="#444444">─</text>
+<text x="505.2" y="81" fill="#444444">─</text>
+<text x="513.6" y="81" fill="#444444">─</text>
+<text x="522" y="81" fill="#444444">─</text>
+<text x="530.4" y="81" fill="#444444">─</text>
+<text x="538.8" y="81" fill="#444444">─</text>
+<text x="547.2" y="81" fill="#444444">─</text>
+<text x="555.6" y="81" fill="#444444">─</text>
+<text x="564" y="81" fill="#444444">─</text>
+<text x="572.4" y="81" fill="#444444">─</text>
+<text x="580.8" y="81" fill="#444444">─</text>
+<text x="589.2" y="81" fill="#444444">─</text>
+<text x="597.6" y="81" fill="#444444">─</text>
+<text x="606" y="81" fill="#444444">─</text>
+<text x="614.4" y="81" fill="#444444">─</text>
+<text x="622.8" y="81" fill="#444444">─</text>
+<text x="631.2" y="81" fill="#444444">─</text>
+<text x="639.6" y="81" fill="#444444">─</text>
+<text x="648" y="81" fill="#444444">─</text>
+<text x="656.4" y="81" fill="#444444">─</text>
+<text x="664.8" y="81" fill="#444444">─</text>
+<text x="673.2" y="81" fill="#444444">─</text>
+<text x="681.6" y="81" fill="#444444">─</text>
+<text x="690" y="81" fill="#444444">─</text>
+<text x="698.4" y="81" fill="#444444">─</text>
+<text x="706.8" y="81" fill="#444444">─</text>
+<text x="715.2" y="81" fill="#444444">─</text>
+<text x="723.6" y="81" fill="#444444">─</text>
+<text x="732" y="81" fill="#444444">─</text>
+<text x="740.4" y="81" fill="#444444">─</text>
+<text x="748.8" y="81" fill="#444444">─</text>
+<text x="757.2" y="81" fill="#444444">─</text>
+<text x="765.6" y="81" fill="#444444">─</text>
+<text x="774" y="81" fill="#444444">─</text>
+<text x="782.4" y="81" fill="#444444">─</text>
+<text x="790.8" y="81" fill="#444444">─</text>
+<text x="799.2" y="81" fill="#444444">─</text>
+<text x="807.6" y="81" fill="#444444">─</text>
+<text x="816" y="81" fill="#444444">─</text>
+<text x="824.4" y="81" fill="#444444">─</text>
+<text x="832.8" y="81" fill="#444444">─</text>
+<text x="841.2" y="81" fill="#444444">─</text>
+<text x="849.6" y="81" fill="#444444">─</text>
+<text x="858" y="81" fill="#444444">─</text>
+<text x="866.4" y="81" fill="#444444">─</text>
+<text x="874.8" y="81" fill="#444444">─</text>
+<text x="883.2" y="81" fill="#444444">─</text>
+<text x="891.6" y="81" fill="#444444">─</text>
+<text x="900" y="81" fill="#444444">─</text>
+<text x="908.4" y="81" fill="#444444">─</text>
+<text x="916.8" y="81" fill="#444444">─</text>
+<text x="925.2" y="81" fill="#444444">─</text>
+<text x="68.4" y="119" fill="#8a8a8a">STATE</text>
+<text x="177.6" y="119" fill="#8a8a8a">NAME</text>
+<text x="236.4" y="119" fill="#8a8a8a">AGE</text>
+<text x="286.8" y="119" fill="#8a8a8a">RC</text>
+<text x="328.8" y="119" fill="#8a8a8a">MODEL</text>
+<text x="429.6" y="119" fill="#8a8a8a">EFFORT</text>
+<text x="496.8" y="119" fill="#8a8a8a">ADVISOR</text>
+<text x="597.6" y="119" fill="#8a8a8a">DIRECTORY</text>
+<rect x="18" y="123" width="9" height="19" fill="#303030"/>
+<rect x="26.4" y="123" width="9" height="19" fill="#303030"/>
+<text x="26.4" y="138" fill="#00afff" font-weight="700">›</text>
+<rect x="34.8" y="123" width="9" height="19" fill="#303030"/>
+<rect x="43.2" y="123" width="9" height="19" fill="#303030"/>
+<text x="43.2" y="138" fill="#00afff" font-weight="700">1</text>
+<rect x="51.6" y="123" width="17.4" height="19" fill="#303030"/>
+<rect x="68.4" y="123" width="9" height="19" fill="#303030"/>
+<text x="68.4" y="138" fill="#ffaf00">●</text>
+<rect x="76.8" y="123" width="101.4" height="19" fill="#303030"/>
+<text x="85.2" y="138" fill="#ffaf00">working</text>
+<rect x="177.6" y="123" width="42.6" height="19" fill="#303030"/>
+<text x="177.6" y="138" fill="#cccccc" font-weight="700">api</text>
+<rect x="219.6" y="123" width="17.4" height="19" fill="#303030"/>
+<rect x="236.4" y="123" width="51" height="19" fill="#303030"/>
+<text x="236.4" y="138" fill="#8a8a8a">42s</text>
+<rect x="286.8" y="123" width="42.6" height="19" fill="#303030"/>
+<text x="286.8" y="138" fill="#00d700">on</text>
+<rect x="328.8" y="123" width="605.4" height="19" fill="#303030"/>
+<text x="328.8" y="138" fill="#cccccc">opus</text>
+<text x="370.8" y="138" fill="#cccccc">5.5</text>
+<text x="429.6" y="138" fill="#cccccc">high</text>
+<text x="496.8" y="138" fill="#cccccc">opus</text>
+<text x="538.8" y="138" fill="#cccccc">5.5</text>
+<text x="597.6" y="138" fill="#cccccc">~\src\api</text>
+<text x="43.2" y="157" fill="#00afff">2</text>
+<text x="68.4" y="157" fill="#ff0000">✗</text>
+<text x="85.2" y="157" fill="#ff0000">exited</text>
+<text x="177.6" y="157" fill="#cccccc">bench</text>
+<text x="236.4" y="157" fill="#8a8a8a">2h</text>
+<text x="328.8" y="157" fill="#cccccc">sonnet</text>
+<text x="387.6" y="157" fill="#cccccc">5.5</text>
+<text x="429.6" y="157" fill="#cccccc">medium</text>
+<text x="496.8" y="157" fill="#cccccc">off</text>
+<text x="597.6" y="157" fill="#cccccc">~\src\bench</text>
+<text x="43.2" y="176" fill="#00afff">3</text>
+<text x="68.4" y="176" fill="#ff00ff" font-weight="700">?</text>
+<text x="85.2" y="176" fill="#ff00ff" font-weight="700">decide</text>
+<text x="177.6" y="176" fill="#cccccc" font-weight="700">docs</text>
+<text x="236.4" y="176" fill="#8a8a8a">3m</text>
+<text x="286.8" y="176" fill="#00d700">on</text>
+<text x="328.8" y="176" fill="#cccccc">opus</text>
+<text x="370.8" y="176" fill="#cccccc">5.5</text>
+<text x="429.6" y="176" fill="#cccccc">xhigh</text>
+<text x="496.8" y="176" fill="#cccccc">opus</text>
+<text x="538.8" y="176" fill="#cccccc">5.5</text>
+<text x="597.6" y="176" fill="#cccccc">~\src\docs</text>
+<text x="43.2" y="195" fill="#00afff">4</text>
+<text x="68.4" y="195" fill="#00ffff">*</text>
+<text x="85.2" y="195" fill="#00ffff">your</text>
+<text x="127.2" y="195" fill="#00ffff">turn</text>
+<text x="177.6" y="195" fill="#cccccc" font-weight="700">infra</text>
+<text x="236.4" y="195" fill="#8a8a8a">12m</text>
+<text x="286.8" y="195" fill="#8a8a8a">off</text>
+<text x="328.8" y="195" fill="#cccccc">sonnet</text>
+<text x="387.6" y="195" fill="#cccccc">5.5</text>
+<text x="429.6" y="195" fill="#cccccc">low</text>
+<text x="496.8" y="195" fill="#cccccc">opus</text>
+<text x="538.8" y="195" fill="#cccccc">5.5</text>
+<text x="597.6" y="195" fill="#cccccc">C:\work\infra</text>
+<text x="43.2" y="214" fill="#00afff">5</text>
+<text x="68.4" y="214" fill="#00afff">⏸</text>
+<text x="85.2" y="214" fill="#00afff">parked</text>
+<text x="177.6" y="214" fill="#cccccc">notes</text>
+<text x="236.4" y="214" fill="#8a8a8a">2d</text>
+<text x="328.8" y="214" fill="#8a8a8a">fable</text>
+<text x="379.2" y="214" fill="#8a8a8a">5.1</text>
+<text x="429.6" y="214" fill="#8a8a8a">max</text>
+<text x="496.8" y="214" fill="#8a8a8a">off</text>
+<text x="597.6" y="214" fill="#cccccc">~\notes</text>
+<text x="43.2" y="233" fill="#00afff">6</text>
+<text x="68.4" y="233" fill="#00d700">○</text>
+<text x="85.2" y="233" fill="#00d700">quiet</text>
+<text x="177.6" y="233" fill="#cccccc">web</text>
+<text x="236.4" y="233" fill="#8a8a8a">1h</text>
+<text x="286.8" y="233" fill="#00d700">on</text>
+<text x="328.8" y="233" fill="#cccccc">haiku</text>
+<text x="379.2" y="233" fill="#cccccc">5.5</text>
+<text x="429.6" y="233" fill="#cccccc">medium</text>
+<text x="496.8" y="233" fill="#cccccc">sonnet</text>
+<text x="555.6" y="233" fill="#cccccc">5.5</text>
+<text x="597.6" y="233" fill="#cccccc">~\src\web</text>
+<text x="18" y="290" fill="#444444">─</text>
+<text x="26.4" y="290" fill="#444444">─</text>
+<text x="34.8" y="290" fill="#444444">─</text>
+<text x="43.2" y="290" fill="#444444">─</text>
+<text x="51.6" y="290" fill="#444444">─</text>
+<text x="60" y="290" fill="#444444">─</text>
+<text x="68.4" y="290" fill="#444444">─</text>
+<text x="76.8" y="290" fill="#444444">─</text>
+<text x="85.2" y="290" fill="#444444">─</text>
+<text x="93.6" y="290" fill="#444444">─</text>
+<text x="102" y="290" fill="#444444">─</text>
+<text x="110.4" y="290" fill="#444444">─</text>
+<text x="118.8" y="290" fill="#444444">─</text>
+<text x="127.2" y="290" fill="#444444">─</text>
+<text x="135.6" y="290" fill="#444444">─</text>
+<text x="144" y="290" fill="#444444">─</text>
+<text x="152.4" y="290" fill="#444444">─</text>
+<text x="160.8" y="290" fill="#444444">─</text>
+<text x="169.2" y="290" fill="#444444">─</text>
+<text x="177.6" y="290" fill="#444444">─</text>
+<text x="186" y="290" fill="#444444">─</text>
+<text x="194.4" y="290" fill="#444444">─</text>
+<text x="202.8" y="290" fill="#444444">─</text>
+<text x="211.2" y="290" fill="#444444">─</text>
+<text x="219.6" y="290" fill="#444444">─</text>
+<text x="228" y="290" fill="#444444">─</text>
+<text x="236.4" y="290" fill="#444444">─</text>
+<text x="244.8" y="290" fill="#444444">─</text>
+<text x="253.2" y="290" fill="#444444">─</text>
+<text x="261.6" y="290" fill="#444444">─</text>
+<text x="270" y="290" fill="#444444">─</text>
+<text x="278.4" y="290" fill="#444444">─</text>
+<text x="286.8" y="290" fill="#444444">─</text>
+<text x="295.2" y="290" fill="#444444">─</text>
+<text x="303.6" y="290" fill="#444444">─</text>
+<text x="312" y="290" fill="#444444">─</text>
+<text x="320.4" y="290" fill="#444444">─</text>
+<text x="328.8" y="290" fill="#444444">─</text>
+<text x="337.2" y="290" fill="#444444">─</text>
+<text x="345.6" y="290" fill="#444444">─</text>
+<text x="354" y="290" fill="#444444">─</text>
+<text x="362.4" y="290" fill="#444444">─</text>
+<text x="370.8" y="290" fill="#444444">─</text>
+<text x="379.2" y="290" fill="#444444">─</text>
+<text x="387.6" y="290" fill="#444444">─</text>
+<text x="396" y="290" fill="#444444">─</text>
+<text x="404.4" y="290" fill="#444444">─</text>
+<text x="412.8" y="290" fill="#444444">─</text>
+<text x="421.2" y="290" fill="#444444">─</text>
+<text x="429.6" y="290" fill="#444444">─</text>
+<text x="438" y="290" fill="#444444">─</text>
+<text x="446.4" y="290" fill="#444444">─</text>
+<text x="454.8" y="290" fill="#444444">─</text>
+<text x="463.2" y="290" fill="#444444">─</text>
+<text x="471.6" y="290" fill="#444444">─</text>
+<text x="480" y="290" fill="#444444">─</text>
+<text x="488.4" y="290" fill="#444444">─</text>
+<text x="496.8" y="290" fill="#444444">─</text>
+<text x="505.2" y="290" fill="#444444">─</text>
+<text x="513.6" y="290" fill="#444444">─</text>
+<text x="522" y="290" fill="#444444">─</text>
+<text x="530.4" y="290" fill="#444444">─</text>
+<text x="538.8" y="290" fill="#444444">─</text>
+<text x="547.2" y="290" fill="#444444">─</text>
+<text x="555.6" y="290" fill="#444444">─</text>
+<text x="564" y="290" fill="#444444">─</text>
+<text x="572.4" y="290" fill="#444444">─</text>
+<text x="580.8" y="290" fill="#444444">─</text>
+<text x="589.2" y="290" fill="#444444">─</text>
+<text x="597.6" y="290" fill="#444444">─</text>
+<text x="606" y="290" fill="#444444">─</text>
+<text x="614.4" y="290" fill="#444444">─</text>
+<text x="622.8" y="290" fill="#444444">─</text>
+<text x="631.2" y="290" fill="#444444">─</text>
+<text x="639.6" y="290" fill="#444444">─</text>
+<text x="648" y="290" fill="#444444">─</text>
+<text x="656.4" y="290" fill="#444444">─</text>
+<text x="664.8" y="290" fill="#444444">─</text>
+<text x="673.2" y="290" fill="#444444">─</text>
+<text x="681.6" y="290" fill="#444444">─</text>
+<text x="690" y="290" fill="#444444">─</text>
+<text x="698.4" y="290" fill="#444444">─</text>
+<text x="706.8" y="290" fill="#444444">─</text>
+<text x="715.2" y="290" fill="#444444">─</text>
+<text x="723.6" y="290" fill="#444444">─</text>
+<text x="732" y="290" fill="#444444">─</text>
+<text x="740.4" y="290" fill="#444444">─</text>
+<text x="748.8" y="290" fill="#444444">─</text>
+<text x="757.2" y="290" fill="#444444">─</text>
+<text x="765.6" y="290" fill="#444444">─</text>
+<text x="774" y="290" fill="#444444">─</text>
+<text x="782.4" y="290" fill="#444444">─</text>
+<text x="790.8" y="290" fill="#444444">─</text>
+<text x="799.2" y="290" fill="#444444">─</text>
+<text x="807.6" y="290" fill="#444444">─</text>
+<text x="816" y="290" fill="#444444">─</text>
+<text x="824.4" y="290" fill="#444444">─</text>
+<text x="832.8" y="290" fill="#444444">─</text>
+<text x="841.2" y="290" fill="#444444">─</text>
+<text x="849.6" y="290" fill="#444444">─</text>
+<text x="858" y="290" fill="#444444">─</text>
+<text x="866.4" y="290" fill="#444444">─</text>
+<text x="874.8" y="290" fill="#444444">─</text>
+<text x="883.2" y="290" fill="#444444">─</text>
+<text x="891.6" y="290" fill="#444444">─</text>
+<text x="900" y="290" fill="#444444">─</text>
+<text x="908.4" y="290" fill="#444444">─</text>
+<text x="916.8" y="290" fill="#444444">─</text>
+<text x="925.2" y="290" fill="#444444">─</text>
+<text x="26.4" y="309" fill="#00afff" font-weight="700">↑</text>
+<text x="34.8" y="309" fill="#00afff" font-weight="700">↓</text>
+<text x="51.6" y="309" fill="#8a8a8a">select</text>
+<text x="127.2" y="309" fill="#00afff" font-weight="700">Enter/click</text>
+<text x="228" y="309" fill="#8a8a8a">open</text>
+<text x="286.8" y="309" fill="#00afff" font-weight="700">1-9</text>
+<text x="320.4" y="309" fill="#00afff" font-weight="700">a-z</text>
+<text x="354" y="309" fill="#8a8a8a">jump</text>
+<text x="412.8" y="309" fill="#00afff" font-weight="700">Ctrl+B</text>
+<text x="471.6" y="309" fill="#00afff" font-weight="700">a</text>
+<text x="488.4" y="309" fill="#8a8a8a">next</text>
+<text x="530.4" y="309" fill="#8a8a8a">waiting</text>
+<text x="614.4" y="309" fill="#00afff" font-weight="700">Ctrl+B</text>
+<text x="673.2" y="309" fill="#00afff" font-weight="700">n/p</text>
+<text x="706.8" y="309" fill="#8a8a8a">next</text>
+<text x="748.8" y="309" fill="#8a8a8a">/</text>
+<text x="765.6" y="309" fill="#8a8a8a">previous</text>
+<rect x="18" y="313" width="59.4" height="19" fill="#262626"/>
+<text x="26.4" y="328" fill="#bcbcbc">roost</text>
+<rect x="76.8" y="313" width="67.8" height="19" fill="#bcbcbc"/>
+<text x="85.2" y="328" fill="#262626" font-weight="700">0:dash</text>
+<rect x="144" y="313" width="59.4" height="19" fill="#262626"/>
+<text x="152.4" y="328" fill="#bcbcbc">1:api</text>
+<rect x="202.8" y="313" width="9" height="19" fill="#262626"/>
+<text x="202.8" y="328" fill="#ffaf00">●</text>
+<rect x="211.2" y="313" width="17.4" height="19" fill="#262626"/>
+<rect x="228" y="313" width="51" height="19" fill="#262626"/>
+<text x="228" y="328" fill="#bcbcbc">3:docs</text>
+<rect x="278.4" y="313" width="17.4" height="19" fill="#262626"/>
+<text x="286.8" y="328" fill="#ff00ff" font-weight="700">?</text>
+<rect x="295.2" y="313" width="84.6" height="19" fill="#262626"/>
+<text x="312" y="328" fill="#bcbcbc">4:infra</text>
+<rect x="379.2" y="313" width="303" height="19" fill="#262626"/>
+<text x="379.2" y="328" fill="#00ffff">*</text>
+<rect x="681.6" y="313" width="9" height="19" fill="#262626"/>
+<text x="681.6" y="328" fill="#ffaf00">●</text>
+<rect x="690" y="313" width="17.4" height="19" fill="#262626"/>
+<text x="690" y="328" fill="#ffaf00">1</text>
+<rect x="706.8" y="313" width="25.8" height="19" fill="#262626"/>
+<text x="706.8" y="328" fill="#ff00ff">?1</text>
+<rect x="732" y="313" width="25.8" height="19" fill="#262626"/>
+<text x="732" y="328" fill="#00ffff">*1</text>
+<rect x="757.2" y="313" width="9" height="19" fill="#262626"/>
+<text x="757.2" y="328" fill="#00d700">○</text>
+<rect x="765.6" y="313" width="17.4" height="19" fill="#262626"/>
+<text x="765.6" y="328" fill="#00d700">1</text>
+<rect x="782.4" y="313" width="9" height="19" fill="#262626"/>
+<text x="782.4" y="328" fill="#00afff">⏸</text>
+<rect x="790.8" y="313" width="17.4" height="19" fill="#262626"/>
+<text x="790.8" y="328" fill="#00afff">1</text>
+<rect x="807.6" y="313" width="9" height="19" fill="#262626"/>
+<text x="807.6" y="328" fill="#ff0000">✗</text>
+<rect x="816" y="313" width="17.4" height="19" fill="#262626"/>
+<text x="816" y="328" fill="#ff0000">1</text>
+<rect x="832.8" y="313" width="109.8" height="19" fill="#262626"/>
+<text x="832.8" y="328" fill="#8a8a8a">C:79%</text>
+<text x="891.6" y="328" fill="#8a8a8a">22:12</text>
+</g></svg>

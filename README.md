@@ -1,122 +1,259 @@
 # roost
 
-Keep your [Claude Code](https://claude.com/claude-code) sessions alive. Run many of them side by side in one
-terminal, see at a glance which one is working or waiting for you, and get them all back, resumed where they stopped,
-after a power cut, a reboot or a dropped SSH connection.
+**A home for your Claude Code sessions.** roost runs every [Claude Code](https://claude.com/claude-code) session in its
+own window of a terminal multiplexer, reads each one's live state from Claude Code's hook events, and brings all of them
+back, resumed where they stopped, after a reboot, a power cut or a dropped SSH / RDP connection.
+
+[Install](#quick-start) · [How it works](#how-it-works) · [Commands](#commands) · [FAQ](#faq) · [For AI agents](#for-ai-agents)
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-3b78ff)](LICENSE)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%C2%B7%20Windows-2ea44f)
+![Written in](https://img.shields.io/badge/written%20in-bash%20%C2%B7%20PowerShell%207-4eaa25)
+![Multiplexer](https://img.shields.io/badge/multiplexer-tmux%20%C2%B7%20psmux-6f42c1)
+![Daemon](https://img.shields.io/badge/daemon-none-lightgrey)
+
+![The roost dashboard on Windows: six sessions in six states, with Remote Control, model, effort and advisor per session, and the status bar listing only the sessions that need you](docs/dashboard.svg)
 
 > roost is an independent community project. It is not made by or affiliated with Anthropic.
 
+## Why
+
+Agent sessions are long-lived, but the terminal that hosts them is not. Close a tab, lose Wi-Fi or reboot for an update,
+and the context of a dozen sessions is scattered across transcripts you have to find and resume by hand. And while they
+run, the one that is blocked on a permission prompt looks exactly like the ones that are working.
+
+roost fixes both: sessions live in tmux (Linux) or [psmux](https://github.com/psmux/psmux) (Windows), a registry fed by
+Claude Code hooks knows the state and id of every session, and one command (or the boot itself) puts them all back.
+
+## Highlights
+
+- **Know which session needs you.** Every window carries its state, from `●` working to `?` blocked on a decision to
+  `*` finished and waiting for your next message. The status bar lists only the sessions that need you, and the terminal
+  tab says `🐦 roost  ?1 *2`. `Ctrl+B a` jumps to the next one: decisions first, then the ones waiting for you.
+- **Survive closed terminals, dropped connections and reboots.** Close the terminal or drop SSH and the sessions keep running. After a
+  reboot or a power cut, roost reopens each one with `claude --resume <id>`. Linux does it from systemd before anyone
+  logs in, Windows at sign-in. Sessions interrupted mid-task get a short "continue where you stopped" prompt; idle ones
+  just reopen.
+- **Restore exactly what you had.** The permission mode and the claude.ai connector setting of each session come back
+  with it. `bypassPermissions` is never restored automatically.
+- **See what each session is running.** A Remote Control column shows which sessions you can reach from another device.
+  On Windows, MODEL, EFFORT and ADVISOR columns show what each session last ran with, including mid-session `/model`,
+  `/effort` and `/advisor` changes.
+- **Stay out of the way.** roost never passes `--model` or effort flags and never edits your Claude Code settings beyond
+  one `hooks` section, written once, with a backup. The hooks print nothing, always exit 0, and do nothing in sessions
+  roost did not start.
+- **Run on plain shell.** bash and PowerShell, tmux and psmux, `jq` on Linux. No daemon, no service of its own on
+  Windows, nothing downloaded at install time.
+
+| | Linux | Windows |
+|---|:-:|:-:|
+| Sessions survive closing the terminal, SSH / RDP drops | ✓ | ✓ |
+| Live state per session from Claude Code hooks | ✓ | ✓ |
+| Status bar with only the sessions that need you, tab title with counts | ✓ | ✓ |
+| Jump to the next waiting session (`roost next`, `Ctrl+B a`) | ✓ | ✓ |
+| Resume after reboot / power loss with `claude --resume` | ✓ before login (systemd) | ✓ at sign-in |
+| Continue prompt only for interrupted sessions, crash-loop guard | ✓ | ✓ |
+| Permission mode and connectors restored | ✓ | ✓ |
+| Remote Control column | ✓ | ✓ |
+| Model, effort and advisor columns | | ✓ |
+| Dashboard | `watch`-style list, click to jump | interactive: click, arrows, keys, wheel |
+| Detects a claude that exited and leaves its window as a plain shell | ✓ `SHELL` | ✓ `✗ exited` |
+| Self-test, health check, uninstaller | ✓ | ✓ |
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph mux["tmux / psmux session 'roost'"]
+        dash["dash window"]
+        w1["window: claude (api)"]
+        w2["window: claude (docs)"]
+    end
+    w1 -- "hook event + JSON on stdin" --> hook["roost-hook<br/>silent, always exit 0"]
+    hook -- "atomic write" --> reg[("registry<br/>sessions/NAME.json")]
+    hook -- "state glyph" --> mux
+    reg --> ui["dashboard · status bar · tab title"]
+    cc[("~/.claude/sessions/PID.json<br/>session transcripts")] -.->|read-only| ui
+    reg --> restore["roost restore"]
+    restore -- "claude --resume ID" --> mux
 ```
- roost  1:dash  3:api ●  4:docs *  5:infra ?                         ●1 ?1 *1 ○0   14:02
+
+**Hooks.** Claude Code calls `roost-hook` on `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`, `PostToolUse` and
+`SessionEnd`. The hook writes one small JSON file per session (name, directory, session id, transcript, state, permission
+mode, connectors) by write-then-rename, so a reader never sees half a file, and it puts the state glyph on the window.
+`PostToolUse` fires after every tool call, so on Windows it runs asynchronously behind a 30 ms check and starts
+PowerShell only while the session shows `?`.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "○ quiet" as quiet
+    state "● working" as working
+    state "? needs you" as ask
+    state "* your turn" as turn
+    state "⏸ parked" as parked
+    [*] --> quiet: SessionStart
+    quiet --> working: UserPromptSubmit
+    turn --> working: UserPromptSubmit
+    working --> ask: Notification (permission or question)
+    ask --> working: PostToolUse (answered)
+    working --> turn: Stop
+    ask --> turn: Stop
+    working --> parked: window closed, reboot, power loss
+    turn --> parked: window closed, reboot
+    parked --> working: restore of a busy session (resume + continue prompt)
+    parked --> quiet: restore of an idle session
+    turn --> [*]: /exit
 ```
 
-| glyph | meaning |
-|---|---|
-| `●` | working |
-| `?` | needs your decision (permission prompt, question) |
-| `*` | finished, waiting for your next message |
-| `○` | quiet |
-| `⏸` | parked: registered, but no window (reopened by `roost restore` or when you pick it) |
+**Two state values.** `state` (busy or idle) decides whether a restored session gets the continue prompt. The display
+state (working, needs you, your turn, quiet) drives the glyphs. A permission prompt changes only the display, so a
+session that was working when the power went out still counts as interrupted.
 
-## What it does
+**Liveness without guesswork.** A session counts as open only while claude really runs in its window. Linux asks tmux
+what the pane runs. Windows matches the window's process id *and* its start time, so a reused PID is never mistaken for
+a running session. Only `/exit` or `/logout` forgets a session; everything else leaves it parked for restore.
 
-- **One screen for all sessions.** `roost` opens a dashboard; click a session to jump to it. Windows: or pick it with
-  the arrow keys and Enter, or press its key. Linux: `Ctrl-b w` lists the sessions and `Ctrl-b a` jumps to the next one
-  that waits for you (`?` first, then `*`).
-  Only sessions that need you are highlighted in the bottom bar.
-- **Sessions survive.** Close the terminal or lose SSH: they keep running (tmux on Linux, [psmux](https://github.com/psmux/psmux) on Windows).
-- **Automatic resume.** After a reboot every registered session is reopened with `claude --resume`. Sessions that were
-  in the middle of a task get a short "continue where you stopped" prompt; idle ones just reopen. A crash-loop guard stops
-  the automatic prompt if the machine keeps rebooting.
-- **Remote Control and tab title.** The `RC` column shows whether a session is connected to Remote Control (`on` /
-  `off`). roost reads it from the files Claude Code keeps for each running process in `~/.claude/sessions`; this is not
-  a documented format, so a future Claude Code version may leave the column empty. The terminal tab is titled
-  `🐦 roost`, plus the sessions that wait for you (`🐦 roost  ?1 *2`).
-- **No change to your Claude settings.** roost never passes `--model` or effort flags and does not touch `model` or
-  `effortLevel`. Only a `hooks` section is added to `~/.claude/settings.json` (backup first). Extra flags pass through:
-  `roost new api ~/src/api --model sonnet`.
-- **No network, no daemons of its own.** Plain bash / PowerShell, tmux / psmux, `jq`. Nothing is downloaded at install time.
+**Restore pipeline** (`roost restore --boot` on Linux, the Startup entry on Windows):
 
-## Linux
+1. Wait until `api.anthropic.com` answers, so sessions do not resume into a dead network.
+2. Crash-loop guard: after three boots within 30 minutes, sessions are resumed without the continue prompt, so a machine
+   that keeps crashing does not keep re-running the task that crashed it.
+3. Reopen every parked or exited session with `claude --resume <id>`, its permission mode and connectors, staggered a few
+   seconds apart.
+4. Append the continue prompt only for sessions whose registry state is busy.
 
-Needs `tmux` (3.2+), `jq`, `claude`. Tested on Ubuntu 24.04 with tmux 3.4.
+**What roost reads from Claude Code**, always read-only and failing soft (an empty cell, never an error):
+- Hook payloads: session id, transcript path, permission mode, notification type.
+- `~/.claude/sessions/<pid>.json`: Remote Control. `bridgeSessionId` is set while a session is connected; pid and
+  process start time are matched, and a session handed to a background job follows the job's process.
+- The end of each transcript (Windows): `message.model`, `effort` and `advisorModel` of the last main-thread assistant
+  entry, read from the last 64 KB and cached until the file changes. Hooks carry no advisor and the model only on some
+  starts; the transcript has all three.
+
+## Quick start
+
+### Linux
+
+Needs `tmux` 3.2+, `jq` and `claude`. Tested on Ubuntu 24.04 with tmux 3.4.
 
 ```bash
 git clone https://github.com/ExpectedArgument/roost && cd roost/linux
 ./install.sh              # command + hooks + tmux config
-./install.sh --systemd    # also: start at boot, resume after power loss (needs sudo; takes over at the next boot if tmux already runs)
+./install.sh --systemd    # also: start at boot and resume after power loss, before login (sudo; takes over at the next boot if tmux already runs)
 roost new api ~/src/api   # first session (add -c to continue the last chat in that directory)
-roost                     # open the dashboard;  Ctrl-b d  detaches;  Ctrl-b w  lists sessions
-roost doctor
+roost                     # dashboard;  Ctrl-b a  next waiting;  Ctrl-b w  all sessions;  Ctrl-b d  detach
+roost doctor ; roost selftest
 ```
 
-Commands: `roost`, `roost new NAME [DIR] [claude args]`, `roost NAME`, `roost ls`, `roost restore [NAME]`,
-`roost close NAME`, `roost forget NAME`, `roost adopt NAME`, `roost next`, `roost doctor`, `roost selftest`.
-Remote use: `ssh -t HOST roost`.
+Remote: `ssh -t HOST roost`. Optional hard-stall recovery (hardware watchdog, panic reboot, NVMe power-state
+workaround) lives in [`linux/extras/recovery`](linux/extras/recovery); it is hardware specific and off by default.
 
-Optional hard-stall recovery (hardware watchdog, panic-reboot, NVMe power-state workaround) lives in
-[`linux/extras/recovery`](linux/extras/recovery). It is hardware specific and off by default; read it before using it.
+### Windows
 
-## Windows (experimental)
-
-Needs PowerShell 7, `claude`, and [psmux](https://github.com/psmux/psmux) (`winget install psmux --version 3.4.0`,
-verify the hash on the release page). The Windows version is **new and only lightly tested**: please report problems.
+Needs PowerShell 7, `claude` and [psmux](https://github.com/psmux/psmux) (`winget install psmux --version 3.4.0`; verify the
+hash on the release page). Best in Windows Terminal. The Windows port is newer than the Linux one; please report problems.
 
 ```powershell
-pwsh -File windows\install.ps1
+git clone https://github.com/ExpectedArgument/roost; cd roost
+pwsh -File windows\install.ps1     # scripts, hooks, sign-in restore, `roost` command, Windows Terminal profile
 roost selftest ; roost doctor
 roost new api C:\src\api
-roost                    # dashboard: a click, arrow keys + Enter, or a session's key open / switch;  Ctrl+B d detaches
+roost                              # dashboard: click, arrows + Enter or a session's key;  Ctrl+B a  next waiting;  Ctrl+B d  detach
 ```
 
-The dashboard (the `dash` window of the `roost` psmux session) redraws in place every 2 seconds. The status bar works like
-the Linux one: it lists the dashboard, the current window and the sessions that want something (`3:api ●`), with the
-totals and the system drive's usage on the right. Best viewed in Windows Terminal.
+`install.ps1` also adds a **roost** profile with the 🐦 icon to the Windows Terminal new-tab menu. Sessions reopen when
+you sign in (Startup folder, no admin rights). Windows has no boot service without a sign-in unless you enable auto
+sign-in yourself.
 
-- Click a row to open that session; the mouse wheel moves the selection (`ROOST_MOUSE=0` turns the mouse off). Only the
-  dashboard takes the mouse; the other windows keep psmux's normal mouse handling.
-- `install.ps1` also adds a **roost** profile with the 🐦 icon to the Windows Terminal new-tab menu.
+## Commands
 
-```
- roost   Claude Code sessions                                    ● 1  ? 1  * 1  ○ 0  ⏸ 1    17:29
-──────────────────────────────────────────────────────────────────────────────────────────────────
+| Command | |
+|---|---|
+| `roost` | open the dashboard (attach to the multiplexer session) |
+| `roost new NAME [DIR] [claude args]` | start a session; extra args go to claude (`-c`, `--model sonnet`, …). DIR defaults to `$ROOST_PROJECT_ROOT/NAME` when it exists. `--connectors` keeps claude.ai connectors on |
+| `roost NAME` | switch to a session (Windows: reopens it first if it is parked or exited) |
+| `roost ls` | list sessions with state, age, RC (and model, effort, advisor on Windows) |
+| `roost restore [NAME]` | reopen parked and exited sessions |
+| `roost next` | jump to the next session that waits for you (`?` first, then `*`); bound to `Ctrl+B a` |
+| `roost close NAME` | `/exit` the session cleanly, close its window, forget it |
+| `roost forget NAME` | drop the registry entry only |
+| `roost adopt NAME` | Linux: register a tmux window where claude already runs |
+| `roost doctor` | health check: tools, hooks, restore at boot / sign-in |
+| `roost selftest` | test the scripts against a throw-away setup, touching no real session |
 
-      STATE        NAME   AGE   RC   DIRECTORY
- › 1  ? decide     api    3m    on   ~\src\api
-   2  ● working    docs   1m    off  ~\src\docs
-   3  * your turn  infra  1h    on   C:\work\infra
-   4  ⏸ parked     notes  2d         ~\notes
-```
-
-Sessions reopen after you sign in (Startup folder; no admin needed). Windows has no equivalent of a boot service without
-sign-in unless you enable auto sign-in yourself.
-
-## Config
+## Configuration
 
 | | Linux | Windows |
 |---|---|---|
 | default claude flags | `~/.config/roost/claude-flags` (`--permission-mode auto`) | `%LOCALAPPDATA%\roost\config\claude-flags` |
-| resume prompt | `~/.config/roost/resume-prompt.txt` | `...\config\resume-prompt.txt` |
-| state | `~/.local/state/roost` | `%LOCALAPPDATA%\roost` |
+| continue prompt | `~/.config/roost/resume-prompt.txt` | `…\config\resume-prompt.txt` |
+| sessions that keep claude.ai connectors (or `*`) | `~/.config/roost/connectors-allow` | `…\config\connectors-allow` |
+| state and registry | `~/.local/state/roost` | `%LOCALAPPDATA%\roost` |
 
-Environment: `ROOST_PROJECT_ROOT` (Linux: `roost new NAME` uses `$ROOST_PROJECT_ROOT/NAME` if it exists),
-`ROOST_AUTOCONTINUE=0` (never send the automatic prompt), `ROOST_CLAUDE_BIN`, `ROOST_STAGGER`, `ROOST_NET_WAIT`,
-`ROOST_MOUSE=0` (Windows: the dashboard ignores the mouse).
+Sessions not listed in `connectors-allow` start with `ENABLE_CLAUDEAI_MCP_SERVERS=false`, which saves tokens when you do
+not need them. The default is `*`, so nothing changes until you edit it.
 
-On Linux, `~/.config/roost/connectors-allow` lists projects (or `*`) that keep claude.ai connectors enabled; others
-start with `ENABLE_CLAUDEAI_MCP_SERVERS=false`, which saves tokens if you do not need them.
+Environment: `ROOST_PROJECT_ROOT`, `ROOST_AUTOCONTINUE=0` (never send the continue prompt), `ROOST_CLAUDE_BIN`,
+`ROOST_STAGGER`, `ROOST_NET_WAIT`, and on Windows `ROOST_MOUSE=0` (the dashboard leaves the mouse alone).
 
-## How it works
+## Guarantees
 
-Claude Code hooks (`SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`, `SessionEnd`, and `PostToolUse` on Linux) call a tiny
-script that records each session's id, directory and state in a registry and puts the glyph in the window name. `roost
-restore` reads that registry. The hooks print nothing (hook output would be injected into Claude's context) and always exit 0.
-Only `/exit` or `/logout` forgets a session; a closed window or a reboot keeps it parked for restore.
+- **Your settings stay yours.** The installers add one `hooks` section to `~/.claude/settings.json` after backing it up,
+  detect existing entries and leave the file untouched when nothing is missing. `model`, `effortLevel` and everything
+  else are never written.
+- **Hooks cannot hurt a session.** They print nothing (hook output would reach the model's context), always exit 0,
+  never block on anything and ignore sessions roost did not start.
+- **Nothing is assumed about Claude Code internals.** Its per-process files and transcripts are undocumented, so every
+  read is defensive: a missing file or field means an empty cell, never a failed command.
+- **No surprises with permissions.** A restored session gets back its own permission mode, except `bypassPermissions`,
+  which is never restored automatically. On Windows, `roost close` sends Esc before `/exit`, so a pending permission
+  prompt is cancelled, never answered.
+- **No telemetry, no daemon.** The only network access is the reachability check before a boot-time restore.
 
-## Uninstall
+## Testing
 
-Linux: `linux/uninstall.sh`. Windows: see the bottom of `windows/install.ps1`. Both restore your settings from the backup
-or remove only roost's hook entries; your conversations are never touched.
+```text
+linux/bin/roost selftest                         # own tmux socket, state dir and a fake claude: new, hooks, ls, title, next, restore, SHELL, close, RC
+pwsh -File windows\roost.ps1 selftest            # temp home, dry-run psmux, roost-run.ps1 with a fake claude: hooks, restore, run, next, transcripts, RC
+pwsh -File windows\probe-statusbar.ps1 -Click …  # renders the psmux status bar through a pseudoconsole and clicks its labels
+```
+
+Tested on Ubuntu 24.04 with tmux 3.4, and on Windows 11 with PowerShell 7.6, psmux 3.4.0 and Windows Terminal 1.24.
+
+## FAQ
+
+**What happens when the machine reboots or loses power?**
+Every registered session is parked. On Linux with `--systemd`, the tmux server and the restore unit start at boot, before
+anyone logs in. On Windows, restore runs when you sign in. Each session comes back with `claude --resume`, in its own
+directory, with its permission mode. Those that were working get the continue prompt.
+
+**Does roost change my Claude Code configuration?**
+Only the `hooks` section, once, with a backup. Model, effort, advisor, permissions and every other setting are left
+alone. Extra flags you give `roost new` are passed to claude unchanged.
+
+**A session shows `✗ exited` or `SHELL`. What happened?**
+claude quit, for example after a crash or a Ctrl+C, and its window stayed open as a plain shell. `roost restore NAME`
+resumes it in a fresh window. On Windows, picking it on the dashboard or `roost NAME` does the same.
+
+**Does it work remotely?**
+Yes. Detach, disconnect, come back: `ssh -t HOST roost` on Linux. On Windows, sessions survive a dropped Remote Desktop
+connection. With Claude Code's Remote Control, the RC column shows which sessions you can reach from another device.
+
+**Why psmux on Windows?**
+It is a native tmux-compatible multiplexer for Windows, so sessions run in real Windows processes, with no WSL. roost
+works around a few psmux 3.4.0 quirks, documented in [`windows/CLAUDE.md`](windows/CLAUDE.md).
+
+**How do I remove it?**
+`linux/uninstall.sh`, or `pwsh -File windows\uninstall.ps1 [-DryRun]`. Both back up `settings.json` and remove only
+roost's hook entries. Your conversations are never touched.
+
+## For AI agents
+
+Read [`CLAUDE.md`](CLAUDE.md) first (shared design: hook events, state values, registry, invariants), then
+[`linux/CLAUDE.md`](linux/CLAUDE.md) or [`windows/CLAUDE.md`](windows/CLAUDE.md) for the port you change. Mirror a
+behaviour change in both ports unless it is platform specific. Never test against the user's live multiplexer session:
+both self-tests and the recipes in the port notes use throw-away sessions, homes and a fake claude.
 
 ## License
 
