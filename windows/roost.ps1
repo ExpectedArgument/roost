@@ -116,11 +116,18 @@ function Get-RcIndex {
 
 # ---- dashboard input: keys and mouse ----------------------------------------------------------------------------------
 # The dash reads console input records itself: [Console]::KeyAvailable silently drops mouse records. It asks for the
-# mouse (ENABLE_MOUSE_INPUT here, DECSET 1000/1006 in Show-Dash); psmux then forwards clicks in the dash pane only, and
-# conhost turns them into MOUSE_EVENT records. Other windows keep psmux's own mouse handling (no global bindings).
+# mouse (ENABLE_MOUSE_INPUT here, DECSET 1000/1006 in Show-Dash); psmux then forwards clicks in the dash pane only.
+# Other windows keep psmux's own mouse handling (no global bindings).
+# psmux types what the attached terminal sends into the pane as VT TEXT: key-down records with vk 0 carrying
+# "ESC [ A" for Up or "ESC [ < 0 ; 11 ; 6 M" for a click (only the key-up records carry the real vk). So the reader parses
+# escape sequences itself, and nothing inside one may count as a key: the digits of a click's coordinates would
+# otherwise "press" 1-9 and open sessions. Real MOUSE_EVENT records (e.g. from `send-keys -l`) are handled too.
+# ROOST_DASH_LOG=<file> logs every raw input record.
 $DashInputSrc = @'
 using System;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 public sealed class RoostDashEvent { public int Vk; public char Ch; public bool Click; public int Y = -1; public int Wheel; }
 public static class RoostDashInput {
     [StructLayout(LayoutKind.Explicit)] struct KEY { [FieldOffset(0)] public int Down; [FieldOffset(4)] public ushort Repeat; [FieldOffset(6)] public ushort Vk; [FieldOffset(8)] public ushort Scan; [FieldOffset(10)] public ushort Ch; [FieldOffset(12)] public uint Ctrl; }
@@ -132,47 +139,117 @@ public static class RoostDashInput {
     [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
     [DllImport("kernel32.dll", EntryPoint = "ReadConsoleInputW")] static extern bool ReadConsoleInput(IntPtr h, [Out] REC[] b, uint n, out uint read);
     static IntPtr h; static uint saved; static bool on;
-    // mouse records on; quick edit (mouse selects text) and VT input off, so keys and clicks arrive as records
-    public static bool Enable() {
+    public static string LogPath;
+
+    // VT input off; with mouse: mouse records on and quick edit (mouse selects text) off
+    public static bool Enable(bool mouse) {
         h = GetStdHandle(-10);
         if (!GetConsoleMode(h, out saved)) return false;
-        on = SetConsoleMode(h, (saved | 0x0010u | 0x0080u) & ~0x0040u & ~0x0200u);
+        uint m = saved & ~0x0200u;
+        if (mouse) m = (m | 0x0010u | 0x0080u) & ~0x0040u;
+        on = SetConsoleMode(h, m);
         return on;
     }
     public static void Restore() { if (on) { SetConsoleMode(h, saved); on = false; } }
+
+    static bool ReadRec(long ms, out REC rec) {
+        rec = default(REC);
+        if (WaitForSingleObject(h, (uint)Math.Max(0, ms)) != 0) return false;
+        var buf = new REC[1]; uint n;
+        if (!ReadConsoleInput(h, buf, 1, out n) || n == 0) return false;
+        rec = buf[0];
+        if (LogPath != null) {
+            string d = rec.Type == 1 ? "key down=" + rec.Key.Down + " vk=" + rec.Key.Vk + " ch=" + rec.Key.Ch
+                     : rec.Type == 2 ? "mouse x=" + rec.Mouse.X + " y=" + rec.Mouse.Y + " b=" + rec.Mouse.Buttons.ToString("x") + " f=" + rec.Mouse.Flags
+                     : "type=" + rec.Type;
+            try { File.AppendAllText(LogPath, DateTime.Now.ToString("HH:mm:ss.fff ") + d + "\n"); } catch { }
+        }
+        return true;
+    }
+
+    // the next character of an escape sequence (key-down records only), or -1 after ms without one
+    static int SeqChar(int ms) {
+        long until = Environment.TickCount64 + ms;
+        while (true) {
+            long left = until - Environment.TickCount64;
+            if (left <= 0) return -1;
+            REC r;
+            if (!ReadRec(left, out r)) return -1;
+            if (r.Type == 1 && r.Key.Down != 0 && r.Key.Ch != 0) return r.Key.Ch;
+        }
+    }
+
+    static RoostDashEvent Key(int vk) { return new RoostDashEvent { Vk = vk }; }
+    static RoostDashEvent Cursor(int f) {
+        switch (f) { case 'A': return Key(38); case 'B': return Key(40); case 'H': return Key(36); case 'F': return Key(35); }
+        return null;
+    }
+
+    // after ESC: "[" params final (CSI) or "O" final (SS3); anything else is a lone Esc / Alt+key and is ignored
+    static RoostDashEvent Escape() {
+        int c = SeqChar(250);
+        if (c == 'O') return Cursor(SeqChar(1000));
+        if (c != '[') return null;
+        var p = new StringBuilder();
+        while (true) {
+            int x = SeqChar(1000);
+            if (x < 0 || p.Length > 32) return null;
+            if (x >= 0x40 && x <= 0x7E) return Csi(p.ToString(), x);
+            p.Append((char)x);
+        }
+    }
+
+    static RoostDashEvent Csi(string p, int f) {
+        if (p.StartsWith("<") && (f == 'M' || f == 'm')) {          // SGR mouse: ESC [ < button ; x ; y M (press) / m (release)
+            var a = p.Substring(1).Split(';');
+            int b, x, y;
+            if (a.Length != 3 || !int.TryParse(a[0], out b) || !int.TryParse(a[1], out x) || !int.TryParse(a[2], out y)) return null;
+            if ((b & 64) != 0) return f == 'M' ? new RoostDashEvent { Wheel = (b & 1) == 0 ? 1 : -1 } : null;
+            if (f == 'M' && (b & 32) == 0 && (b & 3) == 0) return new RoostDashEvent { Click = true, Y = y - 1 };
+            return null;                                              // release, motion, middle / right button
+        }
+        if (f == '~') { if (p == "1" || p == "7") return Key(36); if (p == "4" || p == "8") return Key(35); return null; }
+        return Cursor(f);
+    }
+
     // the next key press, left click or wheel step within ms milliseconds (other records are dropped), else null
     public static RoostDashEvent Next(int ms) {
-        var buf = new REC[1];
         long until = Environment.TickCount64 + ms;
         while (true) {
             long left = Math.Max(0, until - Environment.TickCount64);
-            if (WaitForSingleObject(h, (uint)left) != 0) return null;
-            uint n;
-            if (!ReadConsoleInput(h, buf, 1, out n) || n == 0) return null;
-            var r = buf[0];
-            if (r.Type == 1 && r.Key.Down != 0) return new RoostDashEvent { Vk = r.Key.Vk, Ch = (char)r.Key.Ch };
-            if (r.Type == 2) {
+            REC r;
+            if (!ReadRec(left, out r)) return null;
+            RoostDashEvent ev = null;
+            if (r.Type == 1 && r.Key.Down != 0) {
+                int ch = r.Key.Ch;
+                if (ch == 27) ev = Escape();
+                else if (ch == 13) ev = Key(13);
+                else if (ch >= 32) ev = new RoostDashEvent { Ch = (char)ch };
+                else if (ch == 0 && r.Key.Vk != 0) ev = Key(r.Key.Vk);   // a plain console key without a character (arrows)
+            } else if (r.Type == 2) {
                 var m = r.Mouse;
-                if ((m.Flags & 0x4) != 0) return new RoostDashEvent { Wheel = ((short)(m.Buttons >> 16)) > 0 ? 1 : -1 };
-                if (m.Flags == 0 && (m.Buttons & 0x1) != 0) return new RoostDashEvent { Click = true, Y = m.Y };
+                if ((m.Flags & 0x4) != 0) ev = new RoostDashEvent { Wheel = ((short)(m.Buttons >> 16)) > 0 ? 1 : -1 };
+                else if (m.Flags == 0 && (m.Buttons & 0x1) != 0) ev = new RoostDashEvent { Click = true, Y = m.Y };
             }
+            if (ev != null) return ev;
             if (left == 0) return null;
         }
     }
 }
 '@
 
-function Enable-DashInput {
-    if ($env:ROOST_MOUSE -eq '0') { return $false }
+# $true when the record reader is active (keys always go through it; the mouse only when $Mouse)
+function Enable-DashInput([bool]$Mouse) {
     try {
         if (-not ('RoostDashInput' -as [type])) { Add-Type -TypeDefinition $DashInputSrc }
-        return [RoostDashInput]::Enable()
+        if ($env:ROOST_DASH_LOG) { [RoostDashInput]::LogPath = $env:ROOST_DASH_LOG }
+        return [RoostDashInput]::Enable($Mouse)
     } catch { return $false }
 }
 
 # waits up to $Ms ms for a key, click or wheel step: @{ Vk; Ch; Click; Y (screen line); Wheel (+1 up / -1 down) } or $null
-function Read-DashInput([int]$Ms, [bool]$Mouse) {
-    if ($Mouse) {
+function Read-DashInput([int]$Ms, [bool]$Reader) {
+    if ($Reader) {
         $ev = [RoostDashInput]::Next($Ms)
         if (-not $ev) { return $null }
         $y = $ev.Y
@@ -401,7 +478,9 @@ function Show-Dash {
     $inMux = [bool]$env:TMUX
     try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }
     if ($inMux) { Set-PcTheme }
-    $mouse = Enable-DashInput
+    $wantMouse = ($env:ROOST_MOUSE -ne '0')
+    $reader = Enable-DashInput $wantMouse
+    $mouse = $reader -and $wantMouse
     $hints = @(
         @($Arrows, 'select'), @($(if ($mouse) { 'Enter/click' } else { 'Enter' }), 'open'), @('1-9 a-z', 'jump'),
         @('Ctrl+B n/p', 'next / previous'), @('Ctrl+B w', 'all windows'), @('Ctrl+B d', 'detach')
@@ -469,7 +548,7 @@ function Show-Dash {
             if ($frame -ne $last) { [Console]::Out.Write("$E[H$frame$E[0m$E[J"); [Console]::Out.Flush(); $last = $frame }
 
             # wait up to 2 s for a key, a click or the wheel, then refresh
-            $in = Read-DashInput 2000 $mouse
+            $in = Read-DashInput 2000 $reader
             if (-not $in -or -not $rows) { continue }
             $open = $null
             if ($in.Wheel -gt 0) { if ($ix -gt 0) { $sel = $rows[$ix - 1].Name } }
@@ -498,7 +577,8 @@ function Show-Dash {
             }
         }
     } finally {
-        if ($mouse) { [Console]::Out.Write("$E[?1006l$E[?1000l"); [RoostDashInput]::Restore() }
+        if ($mouse) { [Console]::Out.Write("$E[?1006l$E[?1000l") }
+        if ($reader) { [RoostDashInput]::Restore() }
         [Console]::Out.Write("$E[0m$E[?7h$E[?25h")
     }
 }

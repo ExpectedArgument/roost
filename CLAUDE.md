@@ -29,8 +29,12 @@ There is no build, lint or test framework. Don't invent one. What exists:
   even when that pane belongs to a `psmux -L <name>` server. A dashboard tested on a `-L` server would therefore act on
   the user's real sessions. Test it instead in a separate session on the default server:
   - set `ROOST_PSMUX_SESSION=roosttest`, a temp `ROOST_HOME`, `ROOST_DRY=1` and a temp `CLAUDE_CONFIG_DIR`;
-  - inject clicks with `psmux send-keys -t roosttest:dash -l "<ESC>[<0;X;YM"` (SGR, 1-based) and read the result with
+  - inject clicks the way psmux delivers real ones, as typed text: `psmux send-keys -t roosttest:dash Escape`, then
+    `psmux send-keys -t roosttest:dash -l '[<0;X;YM'` (SGR, 1-based). Read the result with
     `psmux display-message -p -t roosttest '#{window_name}'`;
+  - don't put the ESC inside a single `send-keys -l`: that takes another path (conhost turns it into a `MOUSE_EVENT`
+    record) and hides bugs in the text path;
+  - `ROOST_DASH_LOG=<file>` logs every raw input record. Rows are sorted by name, not by the order you created them;
   - never point a fake `run/NAME.run.json` at a real process and then run `close`, because `close` does
     `taskkill /T /F` on that pid.
 - **Linux:** `roost doctor`. Useful knobs:
@@ -106,11 +110,16 @@ roost never passes `--model` or effort flags. Default claude flags come from `co
   - `Show-Dash` reads console input records itself through the embedded C# class `RoostDashInput`
     (`$DashInputSrc`), because `[Console]::KeyAvailable` silently drops mouse records.
   - It asks for the mouse twice: `ENABLE_MOUSE_INPUT` (quick edit and VT input off) and DECSET 1000/1006. psmux then
-    forwards clicks to that pane only (checkable as `#{mouse_any_flag}`), and conhost turns them into `MOUSE_EVENT`
-    records. No global `MouseDown1Pane` binding is used, because that would replace psmux's click handling in every
-    pane.
+    forwards clicks to that pane only (checkable as `#{mouse_any_flag}`). No global `MouseDown1Pane` binding is used,
+    because that would replace psmux's click handling in every pane.
+  - psmux types keys and mouse reports into the pane as **VT text**. They arrive as key-down records with `vk=0`
+    (`ESC [ A` for Up, `ESC [ < 0;11;6 M` for a click); only the key-up records carry the real vk. Real `MOUSE_EVENT`
+    records can arrive too.
+  - The reader therefore parses escape sequences itself (`Escape` / `Csi`). A character inside an escape sequence
+    must never count as a key: the digits of a click's coordinates would "press" 1-9 and open sessions.
   - A click maps to a row through `$RowY0` (the screen line of the first row) and that frame's `$top` / `$end`.
-  - `ROOST_MOUSE=0` falls back to `ReadKey`.
+  - `ROOST_MOUSE=0` only stops asking for the mouse. Keys still go through the reader, because plain
+    `[Console]::ReadKey` would see `ESC [ A` as Esc, `[`, `a`.
 - RC column (`Get-RcIndex`):
   - It reads Claude Code's per-process files `~/.claude/sessions/<pid>.json` (`CLAUDE_CONFIG_DIR` moves `~/.claude`).
     This is an internal, undocumented format.
