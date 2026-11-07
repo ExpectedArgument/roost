@@ -62,6 +62,26 @@ $line = 'start "" /min pwsh -NoProfile -WindowStyle Hidden -File "' + (Join-Path
 Set-Content -LiteralPath (Join-Path $startup 'roost-restore.cmd') -Value $line -Encoding ascii
 Step 'sessions reopen after you sign in (Startup folder)'
 
+# Windows Terminal: a "roost" profile with an icon in the new-tab menu. A JSON fragment, so Terminal's own settings.json
+# is not touched. Detaching (Ctrl+B d) closes that tab; the sessions keep running.
+$wtRoot = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal'
+if ((Test-Path -LiteralPath $wtRoot) -or (Get-Command wt.exe -ErrorAction SilentlyContinue)) {
+    $wtDir = Join-Path $wtRoot 'Fragments\roost'
+    New-Item -ItemType Directory -Force -Path $wtDir | Out-Null
+    $frag = [ordered]@{
+        profiles = @([ordered]@{
+                guid              = '{6f1c3b2a-8d4e-4f7a-9b2c-5e0d1a7f3c48}'
+                name              = 'roost'
+                commandline       = 'pwsh.exe -NoLogo -NoProfile -File "' + (Join-Path $dst 'roost.ps1') + '"'
+                icon              = [char]::ConvertFromUtf32(0x1F426)
+                startingDirectory = '%USERPROFILE%'
+                tabTitle          = 'roost'
+            })
+    }
+    $frag | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $wtDir 'roost.json') -Encoding utf8
+    Step 'Windows Terminal profile "roost" added (new-tab menu)'
+}
+
 # `roost` command in PowerShell
 if (-not (Test-Path -LiteralPath $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
 if (-not (Select-String -LiteralPath $PROFILE -Pattern 'roost\roost.ps1' -SimpleMatch -Quiet)) {
@@ -79,5 +99,5 @@ Write-Host ('      ' + (Paint 'roost selftest' '38;5;39') + '   ' + (Paint 'roos
 Write-Host ''
 
 # UNINSTALL: delete %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\roost-restore.cmd, delete the `roost` function
-# from your profile, delete ~\roost and %LOCALAPPDATA%\roost, and copy the newest ~\.claude\settings.json.pre-roost-* back over
-# ~\.claude\settings.json.
+# from your profile, delete ~\roost, %LOCALAPPDATA%\roost and %LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\roost,
+# and copy the newest ~\.claude\settings.json.pre-roost-* back over ~\.claude\settings.json.

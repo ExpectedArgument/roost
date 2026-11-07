@@ -25,6 +25,14 @@ There is no build, lint or test framework. Don't invent one. What exists:
   selftest does.
 - **Windows psmux probe:** `windows\probe-psmux.ps1` checks which psmux features roost can rely on. It uses a throw-away
   session called `roost-probe`.
+- **Windows dashboard, end to end:** psmux commands run from *inside* a pane always reach the **default** psmux server,
+  even when that pane belongs to a `psmux -L <name>` server. A dashboard tested on a `-L` server would therefore act on
+  the user's real sessions. Test it instead in a separate session on the default server:
+  - set `ROOST_PSMUX_SESSION=roosttest`, a temp `ROOST_HOME`, `ROOST_DRY=1` and a temp `CLAUDE_CONFIG_DIR`;
+  - inject clicks with `psmux send-keys -t roosttest:dash -l "<ESC>[<0;X;YM"` (SGR, 1-based) and read the result with
+    `psmux display-message -p -t roosttest '#{window_name}'`;
+  - never point a fake `run/NAME.run.json` at a real process and then run `close`, because `close` does
+    `taskkill /T /F` on that pid.
 - **Linux:** `roost doctor`. Useful knobs:
   - `ROOST_TMUX_SOCKET`: a separate tmux server.
   - `ROOST_STATE_DIR` / `ROOST_CONF_DIR`: isolated state and config.
@@ -92,6 +100,29 @@ roost never passes `--model` or effort flags. Default claude flags come from `co
 - psmux has no per-window user options. The hook therefore puts the glyph into the **window name** (`"● api"`), and
   the status-bar format in `Set-PcTheme` parses the name's first character. Window lookup (`Get-WinId`) matches
   `^(\S\s)?NAME$`, which is why session names must match `^[A-Za-z0-9._-]+$` (no spaces).
+- psmux window ids (`@N`) are **per psmux session**, not per server. Always target `"<session>:@N"`. `Get-WinId`
+  returns that form, and the hook renames with it. A bare `@N` can select, or kill, a window of another psmux session.
+- Dashboard input:
+  - `Show-Dash` reads console input records itself through the embedded C# class `RoostDashInput`
+    (`$DashInputSrc`), because `[Console]::KeyAvailable` silently drops mouse records.
+  - It asks for the mouse twice: `ENABLE_MOUSE_INPUT` (quick edit and VT input off) and DECSET 1000/1006. psmux then
+    forwards clicks to that pane only (checkable as `#{mouse_any_flag}`), and conhost turns them into `MOUSE_EVENT`
+    records. No global `MouseDown1Pane` binding is used, because that would replace psmux's click handling in every
+    pane.
+  - A click maps to a row through `$RowY0` (the screen line of the first row) and that frame's `$top` / `$end`.
+  - `ROOST_MOUSE=0` falls back to `ReadKey`.
+- RC column (`Get-RcIndex`):
+  - It reads Claude Code's per-process files `~/.claude/sessions/<pid>.json` (`CLAUDE_CONFIG_DIR` moves `~/.claude`).
+    This is an internal, undocumented format.
+  - A file counts only while `pid` is alive with a matching `procStart` (a FILETIME, same as `run.json`).
+  - It matches the registry `session_id` to the file's `sessionId`. `bridgeSessionId` non-empty means connected.
+  - A session handed to a background job has `parkedJobId`, which points to the job's file (`jobId`).
+  - It must fail soft: no file or field means an empty cell.
+- Tab title: `Set-PcTheme` turns on psmux `set-titles`, the dash pushes `set-titles-string` (`🐦 roost` plus `?`/`*`
+  counts) and `Invoke-Attach` restores the previous title after a detach. `install.ps1` adds a Windows Terminal profile
+  as a JSON fragment (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\roost\roost.json`, emoji icon).
+- Dashboard clicks, the RC column and the tab title are **Windows only so far**. The Linux port has its own click
+  handling (`roost click`) but no RC column or title yet.
 - `Start-Tab` writes the resume id, prompt and extra args to `run/NAME.args.json` and opens a window running
   `roost-run.ps1 NAME`, which builds the `claude` argv from that file. This avoids quoting args through psmux.
 - Open vs parked: `roost-run.ps1` writes `run/NAME.run.json` holding its PID and process start time. `Test-Alive`

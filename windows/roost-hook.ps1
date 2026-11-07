@@ -76,7 +76,7 @@ try {
         foreach ($l in @(& psmux list-windows -t $ps -F '#{window_id}|#{window_name}' 2>$null)) {
             $w = "$l".Split('|', 2)
             if ($w.Count -eq 2 -and $w[1] -match $rx) {
-                & psmux rename-window -t $w[0] "$g $name" 2>$null | Out-Null
+                & psmux rename-window -t "${ps}:$($w[0])" "$g $name" 2>$null | Out-Null   # window ids are per psmux session
                 if ($LASTEXITCODE -ne 0) { & psmux rename-window -t "${ps}:$($w[1])" "$g $name" 2>$null | Out-Null }
                 break
             }

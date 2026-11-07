@@ -16,7 +16,8 @@
 # Registry: %LOCALAPPDATA%\roost\sessions\NAME.json, written by roost-hook.ps1 through Claude Code hooks.
 # Only /exit or /logout forgets a session; closing the window or rebooting keeps it for `roost restore`.
 # Env overrides: ROOST_HOME, ROOST_DRY=1 (print the psmux command instead of running it), ROOST_STAGGER (s), ROOST_NET_WAIT (s),
-#                ROOST_AUTOCONTINUE=0 (never send the automatic "continue" prompt)
+#                ROOST_AUTOCONTINUE=0 (never send the automatic "continue" prompt), ROOST_PSMUX_SESSION (default roost),
+#                ROOST_MOUSE=0 (dashboard ignores the mouse)
 
 $ErrorActionPreference = 'Stop'
 $CsArgs = $args
@@ -41,6 +42,7 @@ $Dot = [string][char]0x25CF; $Ring = [string][char]0x25CB; $Pause = [string][cha
 $Ell = [string][char]0x2026; $Rule = [string][char]0x2500; $Mark = [string][char]0x203A
 $Tick = [string][char]0x2713; $Cross = [string][char]0x2717; $Mid = [string][char]0x00B7
 $Arrows = [string][char]0x2191 + [char]0x2193
+$Bird = [char]::ConvertFromUtf32(0x1F426)   # terminal tab title and the Windows Terminal profile icon
 $Accent = '38;5;39'; $Dim = '38;5;245'; $Faint = '38;5;238'; $Badge = '1;48;5;39;38;5;16'
 $Green = '38;5;40'; $Red = '38;5;196'; $Yellow = '38;5;214'
 # display state -> glyph (same glyphs the hook puts in the window name), label, colour (terminal SGR / psmux)
@@ -78,6 +80,115 @@ function Format-State([string]$Key, [int]$Width) {
     return (Paint $t $s.Sgr)
 }
 function Say([string]$Msg) { Write-Host ((Paint $Mark $Accent) + ' ' + $Msg) }
+function Format-Rc([string]$Rc, [int]$Width) {
+    switch ($Rc) {
+        'on' { return (Paint (Fit 'on' $Width) $Green) }
+        'off' { return (Paint (Fit 'off' $Width) $Dim) }
+        default { return (Fit '' $Width) }
+    }
+}
+
+# ---- Remote Control ---------------------------------------------------------------------------------------------------
+# Claude Code keeps one file per running process in ~/.claude/sessions/<pid>.json (CLAUDE_CONFIG_DIR moves ~/.claude);
+# bridgeSessionId is set while that process is connected to Remote Control. This is Claude Code's internal, undocumented
+# format, so everything here fails soft: no file, a dead or reused pid, or a missing field just shows no RC state.
+$ClaudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+
+# session id -> 'on' | 'off', for every live claude process
+function Get-RcIndex {
+    $procs = @(Get-ChildItem -LiteralPath (Join-Path $ClaudeDir 'sessions') -Filter '*.json' -File -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $j = Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json
+                $p = Get-Process -Id ([int]$j.pid) -ErrorAction SilentlyContinue
+                if ($j.sessionId -and $p -and $p.StartTime.ToFileTimeUtc() -eq [int64]$j.procStart) { $j }
+            } catch { }
+        })
+    $idx = @{}
+    foreach ($j in $procs) { $idx[[string]$j.sessionId] = $(if ($j.bridgeSessionId) { 'on' } else { 'off' }) }
+    # a session handed over to a background job (parkedJobId -> jobId) keeps its Remote Control in the job's process
+    foreach ($j in $procs) {
+        if (-not $j.parkedJobId) { continue }
+        $job = @($procs | Where-Object { $_.jobId -eq $j.parkedJobId }) | Select-Object -First 1
+        if ($job) { $idx[[string]$j.sessionId] = $(if ($job.bridgeSessionId) { 'on' } else { 'off' }) }
+    }
+    return $idx
+}
+
+# ---- dashboard input: keys and mouse ----------------------------------------------------------------------------------
+# The dash reads console input records itself: [Console]::KeyAvailable silently drops mouse records. It asks for the
+# mouse (ENABLE_MOUSE_INPUT here, DECSET 1000/1006 in Show-Dash); psmux then forwards clicks in the dash pane only, and
+# conhost turns them into MOUSE_EVENT records. Other windows keep psmux's own mouse handling (no global bindings).
+$DashInputSrc = @'
+using System;
+using System.Runtime.InteropServices;
+public sealed class RoostDashEvent { public int Vk; public char Ch; public bool Click; public int Y = -1; public int Wheel; }
+public static class RoostDashInput {
+    [StructLayout(LayoutKind.Explicit)] struct KEY { [FieldOffset(0)] public int Down; [FieldOffset(4)] public ushort Repeat; [FieldOffset(6)] public ushort Vk; [FieldOffset(8)] public ushort Scan; [FieldOffset(10)] public ushort Ch; [FieldOffset(12)] public uint Ctrl; }
+    [StructLayout(LayoutKind.Sequential)] struct MOUSE { public short X; public short Y; public uint Buttons; public uint Ctrl; public uint Flags; }
+    [StructLayout(LayoutKind.Explicit)] struct REC { [FieldOffset(0)] public ushort Type; [FieldOffset(4)] public KEY Key; [FieldOffset(4)] public MOUSE Mouse; }
+    [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
+    [DllImport("kernel32.dll")] static extern bool GetConsoleMode(IntPtr h, out uint m);
+    [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr h, uint m);
+    [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
+    [DllImport("kernel32.dll", EntryPoint = "ReadConsoleInputW")] static extern bool ReadConsoleInput(IntPtr h, [Out] REC[] b, uint n, out uint read);
+    static IntPtr h; static uint saved; static bool on;
+    // mouse records on; quick edit (mouse selects text) and VT input off, so keys and clicks arrive as records
+    public static bool Enable() {
+        h = GetStdHandle(-10);
+        if (!GetConsoleMode(h, out saved)) return false;
+        on = SetConsoleMode(h, (saved | 0x0010u | 0x0080u) & ~0x0040u & ~0x0200u);
+        return on;
+    }
+    public static void Restore() { if (on) { SetConsoleMode(h, saved); on = false; } }
+    // the next key press, left click or wheel step within ms milliseconds (other records are dropped), else null
+    public static RoostDashEvent Next(int ms) {
+        var buf = new REC[1];
+        long until = Environment.TickCount64 + ms;
+        while (true) {
+            long left = Math.Max(0, until - Environment.TickCount64);
+            if (WaitForSingleObject(h, (uint)left) != 0) return null;
+            uint n;
+            if (!ReadConsoleInput(h, buf, 1, out n) || n == 0) return null;
+            var r = buf[0];
+            if (r.Type == 1 && r.Key.Down != 0) return new RoostDashEvent { Vk = r.Key.Vk, Ch = (char)r.Key.Ch };
+            if (r.Type == 2) {
+                var m = r.Mouse;
+                if ((m.Flags & 0x4) != 0) return new RoostDashEvent { Wheel = ((short)(m.Buttons >> 16)) > 0 ? 1 : -1 };
+                if (m.Flags == 0 && (m.Buttons & 0x1) != 0) return new RoostDashEvent { Click = true, Y = m.Y };
+            }
+            if (left == 0) return null;
+        }
+    }
+}
+'@
+
+function Enable-DashInput {
+    if ($env:ROOST_MOUSE -eq '0') { return $false }
+    try {
+        if (-not ('RoostDashInput' -as [type])) { Add-Type -TypeDefinition $DashInputSrc }
+        return [RoostDashInput]::Enable()
+    } catch { return $false }
+}
+
+# waits up to $Ms ms for a key, click or wheel step: @{ Vk; Ch; Click; Y (screen line); Wheel (+1 up / -1 down) } or $null
+function Read-DashInput([int]$Ms, [bool]$Mouse) {
+    if ($Mouse) {
+        $ev = [RoostDashInput]::Next($Ms)
+        if (-not $ev) { return $null }
+        $y = $ev.Y
+        if ($ev.Click) { try { $y -= [Console]::WindowTop } catch { } }
+        return [pscustomobject]@{ Vk = $ev.Vk; Ch = $ev.Ch; Click = $ev.Click; Y = $y; Wheel = $ev.Wheel }
+    }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $Ms) {
+        if ([Console]::KeyAvailable) {
+            $k = [Console]::ReadKey($true)
+            return [pscustomobject]@{ Vk = [int]$k.Key; Ch = $k.KeyChar; Click = $false; Y = -1; Wheel = 0 }
+        }
+        Start-Sleep -Milliseconds 40
+    }
+    return $null
+}
 
 function Get-Entries {
     Get-ChildItem -LiteralPath $SessDir -Filter '*.json' -File -ErrorAction SilentlyContinue | ForEach-Object {
@@ -116,13 +227,16 @@ function Get-StateKey($e, [bool]$Alive) {
 # one row per registered session, sorted by name (so the dashboard keys stay stable)
 function Get-Rows {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $rc = Get-RcIndex
     foreach ($e in (Get-Entries | Sort-Object name)) {
         if (-not $e.name) { continue }
         $sid = [string]$e.session_id
+        $alive = Test-Alive ([string]$e.name)
         [pscustomobject]@{
             Name  = [string]$e.name
-            State = Get-StateKey $e (Test-Alive ([string]$e.name))
+            State = Get-StateKey $e $alive
             Age   = Format-Age ($now - [long]$e.updated)
+            Rc    = $(if ($alive -and $sid -and $rc.ContainsKey($sid)) { $rc[$sid] } else { '' })
             Cwd   = Format-Path ([string]$e.cwd)
             Sid   = $sid.Substring(0, [Math]::Min(8, $sid.Length))
         }
@@ -150,15 +264,15 @@ function Show-List {
     if (-not $rows) { Write-Output ('no sessions yet - start one with:  ' + (Paint 'roost new NAME [DIR]' $Accent)); return }
     $nw = [Math]::Min(24, [Math]::Max(4, ($rows.Name | Measure-Object -Property Length -Maximum).Maximum))
     $sw = 11
-    $dw = [Math]::Max(16, (Get-Width) - 1 - (2 + $nw + 2 + $sw + 2 + 4 + 2 + 2 + 8))
+    $dw = [Math]::Max(16, (Get-Width) - 1 - (2 + $nw + 2 + $sw + 2 + 4 + 2 + 3 + 2 + 2 + 8))
     Write-Output ''
     Write-Output ('  ' + (Paint ' roost ' $Badge) + '  ' + (Paint "$($rows.Count) session(s)" $Dim) + '    ' + (Format-Counts (Get-Counts $rows)))
     Write-Output ''
-    Write-Output (Paint ('  ' + (Fit 'NAME' $nw) + '  ' + (Fit 'STATE' $sw) + '  ' + (Fit 'AGE' 4) + '  ' + (Fit 'DIRECTORY' $dw) + '  SESSION') $Dim)
+    Write-Output (Paint ('  ' + (Fit 'NAME' $nw) + '  ' + (Fit 'STATE' $sw) + '  ' + (Fit 'AGE' 4) + '  ' + (Fit 'RC' 3) + '  ' + (Fit 'DIRECTORY' $dw) + '  SESSION') $Dim)
     foreach ($r in $rows) {
         $name = Fit $r.Name $nw
         if ($r.State -in 'attention', 'waiting') { $name = Paint $name '1' }
-        Write-Output ('  ' + $name + '  ' + (Format-State $r.State $sw) + '  ' + (Paint (Fit $r.Age 4) $Dim) + '  ' + (Fit $r.Cwd $dw -KeepEnd) + '  ' + (Paint $r.Sid $Dim))
+        Write-Output ('  ' + $name + '  ' + (Format-State $r.State $sw) + '  ' + (Paint (Fit $r.Age 4) $Dim) + '  ' + (Format-Rc $r.Rc 3) + '  ' + (Fit $r.Cwd $dw -KeepEnd) + '  ' + (Paint $r.Sid $Dim))
     }
     Write-Output ''
 }
@@ -193,8 +307,26 @@ function Set-PcTheme {
         'pane-active-border-style'     = 'fg=colour39'
         'message-style'                = 'bg=colour39,fg=colour16'
         'mode-style'                   = 'bg=colour39,fg=colour16'
+        'set-titles'                   = 'on'          # the terminal tab says roost (the dash window adds the counts)
+        'set-titles-string'            = "$Bird roost"
     }
     foreach ($k in $opts.Keys) { & psmux set-option -t $PcSess $k $opts[$k] 2>$null | Out-Null }
+}
+
+# terminal tab title: "🐦 roost", plus the sessions that wait for you: "🐦 roost  ?1 *2"
+function Format-Title($Counts) {
+    $t = "$Bird roost"
+    $wait = @(foreach ($k in 'attention', 'waiting') { if ($Counts[$k]) { $States[$k].Glyph + $Counts[$k] } })
+    if ($wait) { $t += '  ' + ($wait -join ' ') }
+    return $t
+}
+
+# attach this terminal to the roost screen; after a detach the tab gets its old title back
+function Invoke-Attach {
+    $old = $null
+    try { $old = [Console]::Title } catch { }
+    & psmux attach-session -t $PcSess
+    if ($old) { try { [Console]::Title = $old } catch { } }
 }
 
 # right side of the status bar: "●2 ?1 *0 ○3 ⏸1  14:02" (pushed by the dash window when the counts change)
@@ -214,12 +346,13 @@ function Initialize-Pc {
     Set-PcTheme
 }
 
-# window id (@N) of the session's window; its name is "NAME" or "<glyph> NAME" (the hook adds the glyph)
+# target ("roost:@N") of the session's window; its name is "NAME" or "<glyph> NAME" (the hook adds the glyph).
+# Always session-qualified: psmux window ids are per session, so a bare @N can hit a window of another psmux session.
 function Get-WinId([string]$Name) {
     $rx = '^(\S\s)?' + [regex]::Escape($Name) + '$'
     foreach ($l in @(& psmux list-windows -t $PcSess -F '#{window_id}|#{window_name}' 2>$null)) {
         $p = "$l".Split('|', 2)
-        if ($p.Count -eq 2 -and $p[1] -match $rx) { return $p[0] }
+        if ($p.Count -eq 2 -and $p[1] -match $rx) { return "${PcSess}:$($p[0])" }
     }
     return $null
 }
@@ -244,7 +377,7 @@ function Switch-To([string]$Name) {
     $id = $null
     for ($k = 0; $k -lt 20 -and -not $id; $k++) { $id = Get-WinId $Name; if (-not $id) { Start-Sleep -Milliseconds 250 } }
     if ($id) { & psmux select-window -t $id 2>$null | Out-Null }
-    if (-not $env:TMUX) { & psmux attach-session -t $PcSess }
+    if (-not $env:TMUX) { Invoke-Attach }
 }
 
 # the key hints at the bottom of the dashboard, as many as fit
@@ -259,19 +392,22 @@ function Format-Keys($Items, [int]$Max) {
     return $out
 }
 
-# the "dash" window: lists the sessions; arrow keys + Enter or the session's key open / switch to one.
-# Redraws in place (no Clear-Host flicker) and keeps the status bar counts up to date.
+# the "dash" window: lists the sessions; arrow keys + Enter, the session's key or a click open / switch to one.
+# Redraws in place (no Clear-Host flicker) and keeps the status bar counts and the tab title up to date.
+$RowY0 = 4   # screen line of the first session row (after the title, the rule, a blank line and the column names)
 function Show-Dash {
     $keys = '123456789abcdefghijklmnopqrstuvwxyz'
-    $hints = @(
-        @($Arrows, 'select'), @('Enter', 'open'), @('1-9 a-z', 'jump'),
-        @('Ctrl+B n/p', 'next / previous'), @('Ctrl+B w', 'all windows'), @('Ctrl+B d', 'detach')
-    )
-    $sel = $null; $top = 0; $last = ''; $lastSize = ''; $lastStatus = ''; $clear = $true
+    $sel = $null; $top = 0; $end = 0; $last = ''; $lastSize = ''; $lastStatus = ''; $lastTitle = ''; $clear = $true
     $inMux = [bool]$env:TMUX
     try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }
     if ($inMux) { Set-PcTheme }
+    $mouse = Enable-DashInput
+    $hints = @(
+        @($Arrows, 'select'), @($(if ($mouse) { 'Enter/click' } else { 'Enter' }), 'open'), @('1-9 a-z', 'jump'),
+        @('Ctrl+B n/p', 'next / previous'), @('Ctrl+B w', 'all windows'), @('Ctrl+B d', 'detach')
+    )
     [Console]::Out.Write("$E[?25l$E[?7l")   # hide the cursor, no line wrap
+    if ($mouse) { [Console]::Out.Write("$E[?1000h$E[?1006h") }   # ask for clicks: psmux forwards them to this pane only
     try {
         while ($true) {
             $rows = @(Get-Rows | Select-Object -First $keys.Length)
@@ -279,6 +415,8 @@ function Show-Dash {
             if ($inMux) {
                 $sr = Format-StatusRight $counts
                 if ($sr -ne $lastStatus) { & psmux set-option -t $PcSess status-right $sr 2>$null | Out-Null; $lastStatus = $sr }
+                $tt = Format-Title $counts
+                if ($tt -ne $lastTitle) { & psmux set-option -t $PcSess set-titles-string $tt 2>$null | Out-Null; $lastTitle = $tt }
             }
             $ix = -1
             for ($i = 0; $i -lt $rows.Count; $i++) { if ($rows[$i].Name -eq $sel) { $ix = $i; break } }
@@ -302,8 +440,8 @@ function Show-Dash {
             } else {
                 $nw = [Math]::Min(24, [Math]::Max(4, ($rows.Name | Measure-Object -Property Length -Maximum).Maximum))
                 $sw = 11
-                $dw = [Math]::Max(0, $W - (3 + 3 + $sw + 2 + $nw + 2 + 4 + 2))
-                $L.Add((Paint ('      ' + (Fit 'STATE' $sw) + '  ' + (Fit 'NAME' $nw) + '  ' + (Fit 'AGE' 4) + '  DIRECTORY') $Dim))
+                $dw = [Math]::Max(0, $W - (3 + 3 + $sw + 2 + $nw + 2 + 4 + 2 + 3 + 2))
+                $L.Add((Paint ('      ' + (Fit 'STATE' $sw) + '  ' + (Fit 'NAME' $nw) + '  ' + (Fit 'AGE' 4) + '  ' + (Fit 'RC' 3) + '  DIRECTORY') $Dim))
                 $body = [Math]::Max(1, $H - 8)   # title, rule, blank, column names, "x-y of n", blank, rule, keys
                 if ($ix -lt $top) { $top = $ix }
                 if ($ix -ge $top + $body) { $top = $ix - $body + 1 }
@@ -315,7 +453,7 @@ function Show-Dash {
                     if ($on -or $r.State -in 'attention', 'waiting') { $name = Paint $name '1' }
                     $line = ' ' + $(if ($on) { Paint $Mark "1;$Accent" } else { ' ' }) + ' ' +
                         (Paint ([string]$keys[$i]) $(if ($on) { "1;$Accent" } else { $Accent })) + '  ' +
-                        (Format-State $r.State $sw) + '  ' + $name + '  ' + (Paint (Fit $r.Age 4) $Dim) + '  ' + (Fit $r.Cwd $dw -KeepEnd)
+                        (Format-State $r.State $sw) + '  ' + $name + '  ' + (Paint (Fit $r.Age 4) $Dim) + '  ' + (Format-Rc $r.Rc 3) + '  ' + (Fit $r.Cwd $dw -KeepEnd)
                     if ($on -and $UseColor) { $bg = "$E[48;5;236m"; $line = $bg + $line.Replace("$E[0m", "$E[0m$bg") + "$E[K$E[0m" }
                     $L.Add($line)
                 }
@@ -330,24 +468,27 @@ function Show-Dash {
             if ($clear -or $size -ne $lastSize) { [Console]::Out.Write("$E[2J"); $last = ''; $lastSize = $size; $clear = $false }
             if ($frame -ne $last) { [Console]::Out.Write("$E[H$frame$E[0m$E[J"); [Console]::Out.Flush(); $last = $frame }
 
-            # wait up to 2 s for a key, then refresh
-            $key = $null
-            $sw2 = [Diagnostics.Stopwatch]::StartNew()
-            while ($sw2.ElapsedMilliseconds -lt 2000) {
-                if ([Console]::KeyAvailable) { $key = [Console]::ReadKey($true); break }
-                Start-Sleep -Milliseconds 40
-            }
-            if (-not $key -or -not $rows) { continue }
+            # wait up to 2 s for a key, a click or the wheel, then refresh
+            $in = Read-DashInput 2000 $mouse
+            if (-not $in -or -not $rows) { continue }
             $open = $null
-            switch ($key.Key) {
-                ([ConsoleKey]::UpArrow) { if ($ix -gt 0) { $sel = $rows[$ix - 1].Name } }
-                ([ConsoleKey]::DownArrow) { if ($ix -lt $rows.Count - 1) { $sel = $rows[$ix + 1].Name } }
-                ([ConsoleKey]::Home) { $sel = $rows[0].Name }
-                ([ConsoleKey]::End) { $sel = $rows[-1].Name }
-                ([ConsoleKey]::Enter) { $open = $sel }
-                default {
-                    $k = $keys.IndexOf([char]::ToLowerInvariant($key.KeyChar))
-                    if ($k -ge 0 -and $k -lt $rows.Count) { $sel = $rows[$k].Name; $open = $sel }
+            if ($in.Wheel -gt 0) { if ($ix -gt 0) { $sel = $rows[$ix - 1].Name } }
+            elseif ($in.Wheel -lt 0) { if ($ix -lt $rows.Count - 1) { $sel = $rows[$ix + 1].Name } }
+            elseif ($in.Click) {
+                # only the session rows react; $top / $end are the rows drawn in this frame
+                $i = $top + ($in.Y - $RowY0)
+                if ($in.Y -ge $RowY0 -and $i -lt $end) { $sel = $rows[$i].Name; $open = $sel }
+            } else {
+                switch ($in.Vk) {
+                    ([int][ConsoleKey]::UpArrow) { if ($ix -gt 0) { $sel = $rows[$ix - 1].Name } }
+                    ([int][ConsoleKey]::DownArrow) { if ($ix -lt $rows.Count - 1) { $sel = $rows[$ix + 1].Name } }
+                    ([int][ConsoleKey]::Home) { $sel = $rows[0].Name }
+                    ([int][ConsoleKey]::End) { $sel = $rows[-1].Name }
+                    ([int][ConsoleKey]::Enter) { $open = $sel }
+                    default {
+                        $k = $keys.IndexOf([char]::ToLowerInvariant($in.Ch))
+                        if ($k -ge 0 -and $k -lt $rows.Count) { $sel = $rows[$k].Name; $open = $sel }
+                    }
                 }
             }
             if ($open) {
@@ -357,6 +498,7 @@ function Show-Dash {
             }
         }
     } finally {
+        if ($mouse) { [Console]::Out.Write("$E[?1006l$E[?1000l"); [RoostDashInput]::Restore() }
         [Console]::Out.Write("$E[0m$E[?7h$E[?25h")
     }
 }
@@ -463,6 +605,7 @@ function Show-Doctor {
     $rows = @(Get-Rows)
     $open = @($rows | Where-Object State -ne 'parked').Count
     Info 'sessions' "$($rows.Count) registered, $open open, $($rows.Count - $open) parked"
+    Info 'rc' "$(@($rows | Where-Object Rc -eq 'on').Count) of $open open session(s) connected to Remote Control"
     $rdp = (Get-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -ErrorAction SilentlyContinue).fDenyTSConnections
     if ($rdp -eq 0) { Info 'remote' 'Remote Desktop ON (sessions survive a dropped RDP connection)' } else { Info 'remote' 'Remote Desktop OFF (Settings > System > Remote Desktop, if you want remote access)' }
     $al = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue).AutoAdminLogon
@@ -483,7 +626,7 @@ function Show-Help {
         @('roost selftest', 'check the scripts without opening any window')
     )
     $keyRows = @(
-        @("$Arrows  Enter", 'pick a session on the dashboard (or press its key)'),
+        @("$Arrows  Enter  click", 'pick a session on the dashboard (or press its key)'),
         @('Ctrl+B n / p', 'next / previous window'),
         @('Ctrl+B w', 'list all windows'),
         @('Ctrl+B d', 'detach (sessions keep running)')
@@ -506,7 +649,7 @@ function Show-Help {
 function Invoke-SelfTest {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('roost-selftest-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-    $saved = @{ H = $env:ROOST_HOME; N = $env:ROOST_NAME; D = $env:ROOST_DRY }
+    $saved = @{ H = $env:ROOST_HOME; N = $env:ROOST_NAME; D = $env:ROOST_DRY; C = $script:ClaudeDir }
     $env:ROOST_HOME = $tmp; $env:ROOST_NAME = 'selftest'; $env:ROOST_DRY = '1'
     $script:fails = 0; $script:checks = 0
     $hook = Join-Path $Here 'roost-hook.ps1'
@@ -542,10 +685,22 @@ function Invoke-SelfTest {
         & $check 'new prints a psmux command (dry run)' ($out -match 'new-window.* -n selftab')
         $af = Join-Path $tmp 'run\selftab.args.json'
         & $check 'extra args are passed on (-c)' ((Test-Path -LiteralPath $af) -and ((Get-Content -LiteralPath $af -Raw) -match '"-c"'))
+        $compiled = try { if (-not ('RoostDashInput' -as [type])) { Add-Type -TypeDefinition $DashInputSrc }; $true } catch { $false }
+        & $check 'dashboard mouse input compiles' $compiled
+        # Remote Control state from Claude Code's per-process files (fake ones for this process, plus a stale one)
+        $cs = Join-Path $tmp 'claude\sessions'
+        New-Item -ItemType Directory -Force -Path $cs | Out-Null
+        $st = (Get-Process -Id $PID).StartTime.ToFileTimeUtc()
+        @{ pid = $PID; procStart = $st; sessionId = 'sid-on'; bridgeSessionId = 'session_x' } | ConvertTo-Json | Set-Content (Join-Path $cs 'a.json')
+        @{ pid = $PID; procStart = $st; sessionId = 'sid-off'; bridgeSessionId = '' } | ConvertTo-Json | Set-Content (Join-Path $cs 'b.json')
+        @{ pid = $PID; procStart = 1; sessionId = 'sid-stale'; bridgeSessionId = 'session_y' } | ConvertTo-Json | Set-Content (Join-Path $cs 'c.json')
+        $script:ClaudeDir = Join-Path $tmp 'claude'
+        $rc = Get-RcIndex
+        & $check 'Remote Control: on / off / stale pid ignored' (($rc['sid-on'] -eq 'on') -and ($rc['sid-off'] -eq 'off') -and -not $rc.ContainsKey('sid-stale'))
         & $check 'psmux is installed' ([bool](Get-Command psmux -ErrorAction SilentlyContinue))
         & $check 'claude is installed' ([bool](Get-Command claude -ErrorAction SilentlyContinue))
     } finally {
-        $env:ROOST_HOME = $saved.H; $env:ROOST_NAME = $saved.N; $env:ROOST_DRY = $saved.D
+        $env:ROOST_HOME = $saved.H; $env:ROOST_NAME = $saved.N; $env:ROOST_DRY = $saved.D; $script:ClaudeDir = $saved.C
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
     Write-Host ''
@@ -562,7 +717,7 @@ try {
             Initialize-Pc
             $d = Get-WinId 'dash'
             if ($d) { & psmux select-window -t $d 2>$null | Out-Null }
-            if (-not $env:TMUX) { & psmux attach-session -t $PcSess }
+            if (-not $env:TMUX) { Invoke-Attach }
         }
         'dash' { Show-Dash }
         { $_ -in 'ls', 'list', 'l' } { Show-List }
