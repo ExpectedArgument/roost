@@ -12,6 +12,7 @@
 #   roost forget NAME              drop a registry entry only
 #   roost adopt NAME               register the current tmux window (run inside tmux, claude already running)
 #   roost status                   one-line summary for the tmux status bar
+#   roost title                    terminal tab title: "🐦 roost" plus the sessions that wait for you (?1 *2)
 #   roost doctor                   health checks (service, hooks, watchdog, sysctl)
 #
 # Config: ~/.config/roost/{claude-flags,resume-prompt.txt,connectors-allow}   State: ~/.local/state/roost
@@ -244,6 +245,44 @@ collect() { # fills WS WP WA WC (live windows) and RS RC RU RT (registry)
   done < <(reg_names)
 }
 
+# ---- Remote Control ---------------------------------------------------------------------------------------------------
+# Claude Code keeps one file per running process in ~/.claude/sessions/<pid>.json (CLAUDE_CONFIG_DIR moves ~/.claude);
+# bridgeSessionId is set while that process is connected to Remote Control. This is Claude Code's internal, undocumented
+# format, so everything here fails soft: no file, a dead or reused pid, or a missing field just shows no RC state.
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+proc_start() { # pid -> field 22 of /proc/PID/stat (start time in ticks, the file's procStart); fails if the pid is gone
+  local s
+  { IFS= read -r s <"/proc/$1/stat"; } 2>/dev/null || return 1
+  s="${s##*) }" # drop "PID (comm) ": comm may hold spaces and parentheses; the next field is number 3
+  set -- $s
+  echo "${20}"
+}
+
+rc_index() { # fills RCI: session id -> on|off, for every live claude process
+  declare -gA RCI=()
+  local -A bridge=() parked=() jobs=() # session id -> bridge flag / parked job id, job id -> bridge flag
+  local f pidf line pid pst sid br pj jid
+  for f in "$CLAUDE_DIR"/sessions/*.json; do
+    [ -e "$f" ] || continue
+    pidf="${f##*/}"; pidf="${pidf%.json}"
+    [ -d "/proc/$pidf" ] || continue # the pid is the file name: skip stale files before parsing them
+    line="$(jq -r '[(.pid // ""), (.procStart // ""), (.sessionId // ""), (if (.bridgeSessionId // "") != "" then 1 else 0 end), (.parkedJobId // ""), (.jobId // "")] | map(tostring) | join("\u001f")' "$f" 2>/dev/null)" || continue
+    IFS=$'\x1f' read -r pid pst sid br pj jid <<<"$line"
+    [ -n "$pid" ] && [ -n "$sid" ] || continue
+    [ "$(proc_start "$pid")" = "$pst" ] || continue # a reused pid has another start time
+    bridge[$sid]="$br"
+    [ -n "$pj" ] && parked[$sid]="$pj"
+    [ -n "$jid" ] && jobs[$jid]="$br"
+  done
+  for sid in "${!bridge[@]}"; do RCI[$sid]="$([ "${bridge[$sid]}" = 1 ] && echo on || echo off)"; done
+  # a session handed over to a background job (parkedJobId -> jobId) keeps its Remote Control in the job's process
+  for sid in "${!parked[@]}"; do
+    [ -n "${jobs[${parked[$sid]}]+x}" ] && RCI[$sid]="$([ "${jobs[${parked[$sid]}]}" = 1 ] && echo on || echo off)"
+  done
+  return 0
+}
+
 state_of() { # name -> BUSY|INPUT|IDLE|SHELL|PARKED
   local n="$1"
   if [ -n "${WP[$n]+x}" ]; then
@@ -258,10 +297,11 @@ cmd_ls() {
   local color=0
   [ "${1:-}" = "--color" ] && color=1
   [ -t 1 ] && color=1
-  local R="" Y="" G="" M="" B="" Rd="" Cy=""
-  [ "$color" = 1 ] && { Cy=$'\e[36;1m'; R=$'\e[0m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35;1m'; B=$'\e[34m'; Rd=$'\e[31;1m'; }
+  local R="" Y="" G="" M="" B="" Rd="" Cy="" Dm=""
+  [ "$color" = 1 ] && { Cy=$'\e[36;1m'; R=$'\e[0m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35;1m'; B=$'\e[34m'; Rd=$'\e[31;1m'; Dm=$'\e[2m'; }
   collect
-  local names n s now cwd age sid wact rupd
+  rc_index
+  local names n s now cwd age sid wact rupd rc rcc
   names="$( { printf '%s\n' "${!WS[@]}"; printf '%s\n' "${!RS[@]}"; } | sed '/^$/d' | sort -u)"
   now="$(date +%s)"
   local cb=0 ci=0 cw=0 cd=0 cp=0 cs_=0 total=0
@@ -276,17 +316,20 @@ cmd_ls() {
   printf 'claude sessions: %d   %sBUSY %d%s  %s? DECIDE %d%s  %s* WAIT %d%s  %sIDLE %d%s  %sPARKED %d%s  SHELL %d   | up %s | / %s\n' \
     "$total" "$Y" "$cb" "$R" "$M" "$ci" "$R" "$Cy" "$cw" "$R" "$G" "$cd" "$R" "$B" "$cp" "$R" "$cs_" "$up" "$disk"
   [ -e "$STATE_DIR/LOOP-GUARD" ] && printf '%s!! crash-loop guard active: sessions are resumed WITHOUT the auto-continue prompt%s\n' "$Rd" "$R"
-  printf '%-18s %-7s %-5s %-44s %s\n' NAME STATE AGE CWD SESSION
+  printf '%-18s %-7s %-5s %-3s %-44s %s\n' NAME STATE AGE RC CWD SESSION
   while IFS= read -r n; do
     [ -n "$n" ] || continue
     s="$(state_of "$n")"
     cwd="${WC[$n]:-${RC[$n]:-}}"; cwd="${cwd/#$HOME/~}"
     wact="${WA[$n]:-}"; rupd="${RU[$n]:-}"
     if [ -n "$wact" ]; then age="$(fmt_age $((now - wact)))"; elif [ -n "$rupd" ]; then age="$(fmt_age $((now - rupd)))"; else age="-"; fi
-    sid="${RT[$n]:-}"; sid="${sid:0:8}"
+    sid="${RT[$n]:-}"
+    rc=""; [ -n "$sid" ] && rc="${RCI[$sid]:-}" # empty for a parked session: no process, no state
+    sid="${sid:0:8}"
     local col=""
     case "$s" in BUSY) col="$Y" ;; INPUT) col="$M" ;; WAIT) col="$Cy" ;; IDLE) col="$G" ;; PARKED) col="$B" ;; SHELL) col="$Rd" ;; esac
-    printf '%-18s %s%-7s%s %-5s %-44s %s\n' "$n" "$col" "$s" "$R" "$age" "${cwd:0:44}" "$sid"
+    rcc=""; case "$rc" in on) rcc="$G" ;; off) rcc="$Dm" ;; esac
+    printf '%-18s %s%-7s%s %-5s %s%-3s%s %-44s %s\n' "$n" "$col" "$s" "$R" "$age" "$rcc" "$rc" "$R" "${cwd:0:44}" "$sid"
   done <<<"$names"
   return 0
 }
@@ -303,6 +346,20 @@ cmd_status() {
   disk="$(df --output=pcent / | tail -1 | tr -d ' %')"
   [ "$disk" -ge 90 ] && col="#[fg=red,bold]"
   printf '#[fg=colour214]●%d #[fg=colour201]?%d #[fg=colour51]*%d #[fg=colour40]○%d #[fg=colour39]⏸%d %s/%s%%#[default]' "$b" "$i" "$w" "$d" "$p" "$col" "$disk"
+}
+
+cmd_title() { # terminal tab title (tmux set-titles-string): "🐦 roost", plus the sessions that wait for you: "🐦 roost  ?1 *2"
+  collect
+  local n i=0 w=0 t="🐦 roost"
+  local -a parts=()
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    case "$(state_of "$n")" in INPUT) i=$((i + 1)) ;; WAIT) w=$((w + 1)) ;; esac
+  done < <( { printf '%s\n' "${!WS[@]}"; printf '%s\n' "${!RS[@]}"; } | sed '/^$/d' | sort -u)
+  [ "$i" -gt 0 ] && parts+=("?$i")
+  [ "$w" -gt 0 ] && parts+=("*$w")
+  [ "${#parts[@]}" -gt 0 ] && t+="  ${parts[*]}"
+  printf '%s' "$t"
 }
 
 cmd_close() {
@@ -372,7 +429,7 @@ cmd_doctor() {
   echo "     / usage: $(df --output=pcent / | tail -1 | tr -d ' ')   (>90% is risky)"
 }
 
-cmd_help() { sed -n '2,17p' "$SELF" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,18p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 c="${1:-attach}"
 [ $# -gt 0 ] && shift
@@ -386,6 +443,7 @@ case "$c" in
   adopt) cmd_adopt "$@" ;;
   click) cmd_click "$@" ;;
   status) cmd_status "$@" ;;
+  title) cmd_title "$@" ;;
   doctor) cmd_doctor "$@" ;;
   help|-h|--help) cmd_help ;;
   *) cmd_attach "$c" "$@" ;; # roost vehicle-ros  ==  roost attach vehicle-ros

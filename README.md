@@ -27,6 +27,10 @@ after a power cut, a reboot or a dropped SSH connection.
 - **Automatic resume.** After a reboot every registered session is reopened with `claude --resume`. Sessions that were
   in the middle of a task get a short "continue where you stopped" prompt; idle ones just reopen. A crash-loop guard stops
   the automatic prompt if the machine keeps rebooting.
+- **Remote Control and tab title.** The `RC` column shows whether a session is connected to Remote Control (`on` /
+  `off`). roost reads it from the files Claude Code keeps for each running process in `~/.claude/sessions`; this is not
+  a documented format, so a future Claude Code version may leave the column empty. The terminal tab is titled
+  `🐦 roost`, plus the sessions that wait for you (`🐦 roost  ?1 *2`).
 - **No change to your Claude settings.** roost never passes `--model` or effort flags and does not touch `model` or
   `effortLevel`. Only a `hooks` section is added to `~/.claude/settings.json` (backup first). Extra flags pass through:
   `roost new api ~/src/api --model sonnet`.
@@ -70,11 +74,7 @@ totals and the system drive's usage on the right. Best viewed in Windows Termina
 
 - Click a row to open that session; the mouse wheel moves the selection (`ROOST_MOUSE=0` turns the mouse off). Only the
   dashboard takes the mouse; the other windows keep psmux's normal mouse handling.
-- `RC` shows whether a session is connected to Remote Control (`on` / `off`). roost reads it from the files Claude Code
-  keeps for each running process in `~\.claude\sessions`; this is not a documented format, so a future Claude Code
-  version may leave the column empty.
-- The terminal tab is titled `🐦 roost`, plus the sessions that wait for you (`🐦 roost  ?1 *2`). `install.ps1` also adds
-  a **roost** profile with the same icon to the Windows Terminal new-tab menu.
+- `install.ps1` also adds a **roost** profile with the 🐦 icon to the Windows Terminal new-tab menu.
 
 ```
  roost   Claude Code sessions                                    ● 1  ? 1  * 1  ○ 0  ⏸ 1    17:29

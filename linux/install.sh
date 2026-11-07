@@ -29,10 +29,10 @@ line="source-file $CONF/tmux.conf"
 touch "$HOME/.tmux.conf"
 grep -qxF "$line" "$HOME/.tmux.conf" || { printf '\n# roost\n%s\n' "$line" >>"$HOME/.tmux.conf"; echo "added to ~/.tmux.conf: $line"; }
 
-# Claude Code hooks (existing settings are kept; backup first)
+# Claude Code hooks (existing settings are kept; backup first; untouched when nothing is missing)
 SET="$HOME/.claude/settings.json"
-[ -e "$SET" ] || echo '{}' >"$SET"
-cp -p "$SET" "$SET.pre-roost-$(date +%Y%m%d-%H%M%S)"
+src="$SET"
+if [ ! -e "$SET" ]; then src="$(mktemp)"; echo '{}' >"$src"; fi
 tmp="$(mktemp)"
 jq --arg h "$HOOKDIR/roost-hook.sh" '
   def add($ev; $arg; $t):
@@ -42,8 +42,19 @@ jq --arg h "$HOOKDIR/roost-hook.sh" '
   .hooks = (.hooks // {})
   | add("SessionStart"; "start"; 5) | add("UserPromptSubmit"; "busy"; 5) | add("Stop"; "idle"; 5)
   | add("Notification"; "attention"; 5) | add("SessionEnd"; "end"; 2) | add("PostToolUse"; "resume"; 5)
-' "$SET" >"$tmp" && mv "$tmp" "$SET"
-echo "hooks registered in $SET"
+' "$src" >"$tmp"
+if [ -e "$SET" ] && [ "$(jq -S . "$SET")" = "$(jq -S . "$tmp")" ]; then
+  rm -f "$tmp"
+  echo "hooks already registered in $SET (settings.json unchanged)"
+else
+  if [ -e "$SET" ]; then
+    cp -p "$SET" "$SET.pre-roost-$(date +%Y%m%d-%H%M%S)"
+    echo "settings.json backed up: $SET.pre-roost-*"
+  fi
+  mv "$tmp" "$SET"
+  echo "hooks registered in $SET"
+fi
+[ "$src" = "$SET" ] || rm -f "$src"
 
 if [ "$SYSTEMD" = 1 ]; then
   U="$(id -un)"; ID="$(id -u)"
