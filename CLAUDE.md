@@ -55,8 +55,7 @@ touch `~/.claude/settings.json` only when a hook is missing, after backing it up
 2. The hook writes the registry entry `sessions/NAME.json` atomically (tmp file, then move).
    - Both ports store name, cwd, session_id, transcript, `state`, `permission_mode`, `connectors` and `updated`.
      `restore` reapplies the permission mode (never `bypassPermissions`) and the connectors.
-   - Not every event carries `permission_mode`. Windows keeps the last value seen; Linux writes `auto` when it is
-     missing.
+   - Not every event carries `permission_mode`, so both ports keep the last value seen (`auto` before any).
    - Windows also stores `display`. Linux keeps the display state only in the tmux window option `@roost_state`.
 3. The main script (`linux/bin/roost` / `windows/roost.ps1`) reads the registry for `ls`, the dashboard and `restore`.
    - A window whose claude quit, leaving a plain shell, shows as `SHELL` (Linux) or `✗ exited` (Windows).
@@ -89,9 +88,9 @@ kill or a reboot keeps it, so the session is "parked" and comes back with `roost
 - The terminal tab title is `🐦 roost`, plus `?N` / `*N` for the sessions that need you or wait for you. Windows pushes
   it from the dash. Linux has tmux call `roost title` through `set-titles-string`.
 
-### Model, effort and advisor columns (Windows; not on Linux yet)
+### Model, effort and advisor columns (both ports)
 
-- The Windows dashboard and `roost ls` show MODEL, EFFORT and ADVISOR per session (`opus 5.5`, `max`, `opus 5.5`).
+- `roost ls` and the Windows dashboard show MODEL, EFFORT and ADVISOR per session (`opus 5.5`, `max`, `opus 5.5`).
 - Hooks are no source for these: `model` arrives only on some SessionStarts, `effort` only on tool-context events,
   and the advisor never.
 - The source is the session's transcript (registry `transcript`). Read the **last main-thread assistant entry**,
@@ -102,8 +101,9 @@ kill or a reboot keeps it, so the session is "parked" and comes back with `roost
 - These follow `/model`, `/effort` and `/advisor` changes.
 - It is an internal format, so the rules are:
   - Read only the end of the file. Transcripts reach megabytes, and one entry can be large.
-  - Cache the result until the file changes.
-  - Fail soft: empty cells.
+  - Windows caches the result until the file changes. Linux re-reads it (a 64 KB tail takes about 6 ms), and only in `ls`.
+  - Fail soft: empty cells. A session that has not answered yet shows its configured values (settings and launch
+    flags) in dim.
 
 ### Hook invariants (both ports)
 

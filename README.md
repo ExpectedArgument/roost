@@ -37,8 +37,8 @@ Claude Code hooks knows the state and id of every session, and one command (or t
 - **Restore exactly what you had.** The permission mode and the claude.ai connector setting of each session come back
   with it. `bypassPermissions` is never restored automatically.
 - **See what each session is running.** A Remote Control column shows which sessions you can reach from another device.
-  On Windows, MODEL, EFFORT and ADVISOR columns show what each session last ran with, including mid-session `/model`,
-  `/effort` and `/advisor` changes.
+  MODEL, EFFORT and ADVISOR columns show what each session last ran with, including mid-session `/model`, `/effort`
+  and `/advisor` changes.
 - **Stay out of the way.** roost never passes `--model` or effort flags and never edits your Claude Code settings beyond
   one `hooks` section, written once, with a backup. The hooks print nothing, always exit 0, and do nothing in sessions
   roost did not start.
@@ -55,7 +55,7 @@ Claude Code hooks knows the state and id of every session, and one command (or t
 | Continue prompt only for interrupted sessions, crash-loop guard | ✓ | ✓ |
 | Permission mode and connectors restored | ✓ | ✓ |
 | Remote Control column | ✓ | ✓ |
-| Model, effort and advisor columns | | ✓ |
+| Model, effort and advisor columns | ✓ | ✓ |
 | Dashboard | `watch`-style list, click to jump | interactive: click, arrows, keys, wheel |
 | Detects a claude that exited and leaves its window as a plain shell | ✓ `SHELL` | ✓ `✗ exited` |
 | Self-test, health check, uninstaller | ✓ | ✓ |
@@ -120,8 +120,8 @@ a running session. Only `/exit` or `/logout` forgets a session; everything else 
 - Hook payloads: session id, transcript path, permission mode, notification type.
 - `~/.claude/sessions/<pid>.json`: Remote Control. `bridgeSessionId` is set while a session is connected; pid and
   process start time are matched, and a session handed to a background job follows the job's process.
-- The end of each transcript (Windows): `message.model`, `effort` and `advisorModel` of the last main-thread assistant
-  entry, read from the last 64 KB and cached until the file changes. Hooks carry no advisor and the model only on some
+- The end of each transcript: `message.model`, `effort` and `advisorModel` of the last main-thread assistant
+  entry, read from the last 64 KB (more when an entry is larger). Hooks carry no advisor and the model only on some
   starts; the transcript has all three.
 
 ## Quick start
@@ -166,7 +166,7 @@ sign-in yourself.
 | `roost` | open the dashboard (attach to the multiplexer session) |
 | `roost new NAME [DIR] [claude args]` | start a session; extra args go to claude (`-c`, `--model sonnet`, …). DIR defaults to `$ROOST_PROJECT_ROOT/NAME` when it exists. `--connectors` keeps claude.ai connectors on |
 | `roost NAME` | switch to a session (Windows: reopens it first if it is parked or exited) |
-| `roost ls` | list sessions with state, age, RC (and model, effort, advisor on Windows) |
+| `roost ls` | list sessions with state, age, RC, model, effort and advisor |
 | `roost restore [NAME]` | reopen parked and exited sessions |
 | `roost next` | jump to the next session that waits for you (`?` first, then `*`); bound to `Ctrl+B a` |
 | `roost close NAME` | `/exit` the session cleanly, close its window, forget it |

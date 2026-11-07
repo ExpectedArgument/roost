@@ -42,8 +42,8 @@ if [ "$ev" = "end" ]; then
   exit 0
 fi
 
-old_state=""
-[ -r "$f" ] && old_state="$(jq -r '.state // empty' "$f" 2>/dev/null)"
+old_state=""; old_pm=""
+[ -r "$f" ] && IFS=$'\x1f' read -r old_state old_pm < <(jq -r '[(.state // ""), (.permission_mode // "")] | join("\u001f")' "$f" 2>/dev/null)
 
 case "$ev" in
   busy) st=busy; ds=busy ;;
@@ -68,7 +68,7 @@ esac
 if [ -n "${sid:-}" ]; then
   tmpf="$(mktemp "$dir/.tmp.XXXXXX" 2>/dev/null)" || { setstate "$ds"; exit 0; }
   if jq -n -c --arg name "$name" --arg sid "$sid" --arg cwd "${cwd:-$PWD}" --arg tp "${tp:-}" \
-        --arg pm "${pm:-auto}" --arg st "$st" --argjson now "$(date +%s)" --arg conn "${conn:-}" \
+        --arg pm "${pm:-${old_pm:-auto}}" --arg st "$st" --argjson now "$(date +%s)" --arg conn "${conn:-}" \
         '{name:$name, cwd:$cwd, session_id:$sid, transcript:$tp, permission_mode:$pm, state:$st, connectors:($conn=="1"), updated:$now}' \
         >"$tmpf" 2>/dev/null && [ -s "$tmpf" ]; then
     mv -f "$tmpf" "$f"

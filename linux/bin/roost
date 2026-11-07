@@ -63,9 +63,18 @@ mode_flags() { # $1 = permission mode override (may be empty) -> RES
 # connectors-allow: one project name per line keeps claude.ai connectors on for it; a line with just * keeps them on everywhere
 conn_allowed() { grep -qx -e "$1" -e '\*' "$CONF_DIR/connectors-allow" 2>/dev/null; }
 
+# What a Claude Code tool shell (CLAUDECODE=1) carries for ITS session: the nesting marker (claude refuses to start as a
+# nested session), session / bridge / messaging ids, and the tool-shell defaults. A tmux server started from such a shell
+# hands them to every window, so they are dropped, and only when CLAUDECODE is set: the user's own settings stay.
+LEAK_VARS="CLAUDECODE CLAUDE_PID CLAUDE_JOB_DIR CLAUDE_ENV_FILE CLAUDE_EFFORT CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID
+CLAUDE_CODE_BRIDGE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN
+CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_SSE_PORT CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT CLAUDE_CODE_HOST_SHORT_TEMP_DIRS
+CLAUDE_CODE_DISABLE_TERMINAL_TITLE NO_COLOR GIT_EDITOR GIT_TERMINAL_PROMPT GIT_ASKPASS COREPACK_ENABLE_AUTO_PIN"
+LEAK_VARS="${LEAK_VARS//$'\n'/ }"
+
 ensure_server() {
   tm has-session -t "$TS" 2>/dev/null && return 0
-  tm -u new-session -d -s "$TS" -n dash "exec watch -t -n 5 -c '$SELF' ls --color" 2>/dev/null
+  ( [ -z "${CLAUDECODE:-}" ] || unset $LEAK_VARS; tm -u new-session -d -s "$TS" -n dash "exec watch -t -n 5 -c '$SELF' ls --color" 2>/dev/null )
   tm has-session -t "$TS" 2>/dev/null || die "tmux server could not be started"
   echo "roost: note - tmux server was not running (sudo systemctl start roost-tmux to run it as a service)" >&2
 }
@@ -75,6 +84,7 @@ reg_names() { local f; for f in "$SESS_DIR"/*.json; do [ -e "$f" ] && basename "
 
 launch() { # name cwd sid prompt conn mode [extra claude args...]  -> prints window id
   local name="$1" cwd="$2" sid="$3" prompt="$4" conn="$5" mode="$6"; shift 6
+  local extra="$*" # the launch flags, kept in a window option so `ls` can show a --model / --effort that was asked for
   local -a args
   mode_flags "$mode"; args=("${RES[@]}")
   [ -n "$sid" ] && args+=(--resume "$sid")
@@ -84,16 +94,18 @@ launch() { # name cwd sid prompt conn mode [extra claude args...]  -> prints win
   [ "$conn" = 1 ] || envp="ENABLE_CLAUDEAI_MCP_SERVERS=false "
   local cmd inner
   cmd="${envp}$(printf '%q ' "$CLAUDE_BIN" "${args[@]}")"
-  inner="export XDG_RUNTIME_DIR=/run/user/\$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus; $cmd; echo; echo '[roost] claude exited - plain shell now (roost close $name removes this window)'; exec bash -l"
+  inner="[ -z \"\${CLAUDECODE:-}\" ] || unset $LEAK_VARS; export XDG_RUNTIME_DIR=/run/user/\$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus; $cmd; echo; echo '[roost] claude exited - plain shell now (roost close $name removes this window)'; exec bash -l"
   local -a ef=()
   [ -n "${DISPLAY:-}" ] && ef+=(-e "DISPLAY=$DISPLAY")
   [ -n "${XAUTHORITY:-}" ] && ef+=(-e "XAUTHORITY=$XAUTHORITY")
+  [ -n "${ROOST_STATE_DIR:-}" ] && ef+=(-e "ROOST_STATE_DIR=$ROOST_STATE_DIR") # the hook of this window must write where we do
   local wid
   wid="$(tm new-window -d -P -F '#{window_id}' -t "$TS:" -n "$name" -c "$cwd" "${ef[@]}" bash -lic "$inner")" || return 1
   tm set-option -w -q -t "$wid" @roost_managed 1
   tm set-option -w -q -t "$wid" @roost_name "$name"
   tm set-option -w -q -t "$wid" @roost_state idle
   [ "$conn" = 1 ] && tm set-option -w -q -t "$wid" @roost_conn 1
+  [ -n "$extra" ] && tm set-option -w -q -t "$wid" @roost_extra "$extra"
   echo "$wid"
 }
 
@@ -106,7 +118,7 @@ attach_to() { # $1 = window id or empty
   [ -t 0 ] && [ -t 1 ] || die "not a terminal - from another machine use:  ssh -t HOST roost"
   local -a sel=()
   [ -n "$1" ] && sel=(\; select-window -t "$1")
-  exec tmux ${ROOST_TMUX_SOCKET:+-L "$ROOST_TMUX_SOCKET"} new-session -t "$TS" -s "view-$$" \; set-option destroy-unattached on "${sel[@]}"
+  exec tmux ${ROOST_TMUX_SOCKET:+-L "$ROOST_TMUX_SOCKET"} new-session -t "$TS" -s "view-$$" \; set-option destroy-unattached on "${sel[@]}" 9>&-
 }
 
 cmd_attach() {
@@ -195,17 +207,18 @@ cmd_restore() {
     wait_net || echo "network still unreachable - resuming anyway"
   fi
   ensure_server
-  local name cwd sid tp st mode conn wid pcmd resume_sid prompt c any=0
+  local name cwd sid tp st mode conn wid pcmd resume_sid prompt c any=0 stale neww
+  local -a swaps=() # "stale-window-id new-window-id": a leftover shell is replaced, and may be the window this runs in
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     [ -n "$only" ] && [ "$only" != "$name" ] && continue
     cwd="$(reg_get "$name" cwd)"; sid="$(reg_get "$name" session_id)"; tp="$(reg_get "$name" transcript)"
     st="$(reg_get "$name" state)"; mode="$(reg_get "$name" permission_mode)"; conn="$(reg_get "$name" connectors)"
-    wid="$(wid_of "$name")"
+    wid="$(wid_of "$name")"; stale=""
     if [ -n "$wid" ]; then
       pcmd="$(tm display-message -p -t "$wid" '#{pane_current_command}' 2>/dev/null)"
       [ "$pcmd" = claude ] && continue # already running
-      tm kill-window -t "$wid" 2>/dev/null # leftover plain shell: recreate
+      stale="$wid" # leftover plain shell: recreated below, then killed once the new window exists
     fi
     if [ ! -d "$cwd" ]; then echo "skip $name: $cwd no longer exists"; continue; fi
     case "$mode" in default|acceptEdits|plan|auto|dontAsk) ;; *) mode="" ;; esac
@@ -213,13 +226,21 @@ cmd_restore() {
     if [ -n "$sid" ] && [ -n "$tp" ] && [ -s "$tp" ]; then resume_sid="$sid"; fi
     if [ -n "$resume_sid" ] && [ "$st" = busy ] && [ "$autocont" = 1 ]; then prompt="$(cat "$CONF_DIR/resume-prompt.txt")"; fi
     if [ "$conn" = true ] || conn_allowed "$name"; then c=1; else c=0; fi
-    if launch "$name" "$cwd" "$resume_sid" "$prompt" "$c" "$mode" >/dev/null; then
+    if neww="$(launch "$name" "$cwd" "$resume_sid" "$prompt" "$c" "$mode")"; then
+      [ -n "$stale" ] && swaps+=("$stale $neww")
       echo "restored $name (resume=$([ -n "$resume_sid" ] && echo yes || echo no), continue-prompt=$([ -n "$prompt" ] && echo yes || echo no))"
       any=1
       [ "$boot" = 1 ] && sleep "$STAGGER"
     fi
   done < <(reg_names)
   [ "$any" = 0 ] && echo "nothing to restore"
+  local sw own
+  own="$(tm display-message -p -t "${TMUX_PANE:-}" '#{window_id}' 2>/dev/null)" # set when run by hand inside a window
+  for sw in "${swaps[@]}"; do
+    set -- $sw
+    [ -n "$own" ] && [ "$own" = "$1" ] && tm select-window -t "$2" 2>/dev/null
+    tm kill-window -t "$1" 2>/dev/null # last: this may end the shell that runs us
+  done
   return 0
 }
 
@@ -232,13 +253,13 @@ fmt_age() { # seconds -> 12s / 5m / 3h / 2d
 }
 
 collect() { # fills WS WP WA WC (live windows) and RS RC RU RT (registry)
-  declare -gA WS=() WP=() WA=() WC=() RS=() RC=() RU=() RT=()
+  declare -gA WS=() WP=() WA=() WC=() WX=() RS=() RC=() RU=() RT=()
   if tm has-session -t "$TS" 2>/dev/null; then
-    local wid managed name state pcmd act path
-    while IFS='|' read -r wid managed name state pcmd act path; do
+    local wid managed name state pcmd act path extra
+    while IFS='|' read -r wid managed name state pcmd act path extra; do
       [ "$managed" = 1 ] || continue
-      WS[$name]="$state"; WP[$name]="$pcmd"; WA[$name]="$act"; WC[$name]="$path"
-    done < <(tm list-windows -t "$TS" -F '#{window_id}|#{@roost_managed}|#{@roost_name}|#{@roost_state}|#{pane_current_command}|#{window_activity}|#{pane_current_path}')
+      WS[$name]="$state"; WP[$name]="$pcmd"; WA[$name]="$act"; WC[$name]="$path"; WX[$name]="$extra"
+    done < <(tm list-windows -t "$TS" -F '#{window_id}|#{@roost_managed}|#{@roost_name}|#{@roost_state}|#{pane_current_command}|#{window_activity}|#{pane_current_path}|#{@roost_extra}')
   fi
   local n
   while IFS= read -r n; do
@@ -295,6 +316,55 @@ state_of() { # name -> BUSY|INPUT|IDLE|SHELL|PARKED
   fi
 }
 
+# ---- model / effort / advisor -----------------------------------------------------------------------------------------
+# Hooks don't carry these (the model only on some SessionStarts, the advisor nowhere), but every assistant entry of the
+# session's transcript does: message.model, effort and advisorModel, including /model, /effort and /advisor changes.
+# Internal, undocumented format: read only the end of the file, skip subagent (isSidechain) entries, fail soft. Only
+# `ls` reads transcripts: tmux calls `status` and `title` every few seconds.
+FM=""
+fmt_model() { # claude-opus-5-5 -> "opus 5.5", claude-3-5-sonnet-20241022 -> "sonnet 3.5", opus[1m] -> opus; result in FM
+  local m="${1#claude-}"
+  m="${m%%\[*}"; m="${m%-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]}"; m="${m,,}"
+  if [[ "$m" =~ ^([a-z]+)-([0-9]+)-([0-9]+)$ ]]; then FM="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+  elif [[ "$m" =~ ^([a-z]+)-([0-9]+)$ ]]; then FM="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+  elif [[ "$m" =~ ^([0-9]+)-([0-9]+)-([a-z]+)$ ]]; then FM="${BASH_REMATCH[3]} ${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+  else FM="$m"; fi
+}
+
+tx_info() { # transcript -> TXM TXE TXA (model, effort, advisor: "off" or a model, empty when unknown); fails when there is no answer yet
+  TXM=""; TXE=""; TXA=""
+  local tp="$1" size tl line
+  [ -n "$tp" ] && [ -s "$tp" ] || return 1
+  size="$(stat -c %s "$tp" 2>/dev/null)" || return 1
+  for tl in 65536 1048576 8388608; do # an entry can be large (tool input): widen the window when none is found
+    line="$(tail -c "$tl" "$tp" 2>/dev/null | grep -a '"type":"assistant"' | jq -R -r 'fromjson? | select(.type == "assistant" and ((.isSidechain // false) | not) and ((.message.model // "") != "")) | [.message.model, (.effort // ""), (if has("advisorModel") then ((.advisorModel // "") | if . == "" then "off" else . end) else "" end)] | join("\u001f")' 2>/dev/null | tail -n1)"
+    if [ -n "$line" ]; then IFS=$'\x1f' read -r TXM TXE TXA <<<"$line"; return 0; fi
+    [ "$tl" -ge "$size" ] && break
+  done
+  return 1
+}
+
+cfg_info() { # CWD LAUNCH-FLAGS -> TXM TXE TXA: what a session that has not answered yet is configured to use (shown dim):
+  # project settings, then the user's (model, effortLevel, advisorModel), then claude-flags and the flags it was launched with
+  local f line sm se sa m="" e="" a="" i
+  local -a w
+  for f in "$1/.claude/settings.local.json" "$1/.claude/settings.json" "$CLAUDE_DIR/settings.json"; do
+    [ -r "$f" ] || continue
+    line="$(jq -r '[(.model // ""), (.effortLevel // ""), (.advisorModel // "")] | map(tostring) | join("\u001f")' "$f" 2>/dev/null)" || continue
+    IFS=$'\x1f' read -r sm se sa <<<"$line"
+    [ -n "$m" ] || m="$sm"; [ -n "$e" ] || e="$se"; [ -n "$a" ] || a="$sa"
+  done
+  read -r -a w <<<"$(grep -v '^[[:space:]]*#' "$CONF_DIR/claude-flags" 2>/dev/null | tr '\n' ' ') $2"
+  for ((i = 0; i < ${#w[@]}; i++)); do
+    case "${w[$i]}" in
+      --model) m="${w[$((i + 1))]:-}" ;; --model=*) m="${w[$i]#*=}" ;;
+      --effort) e="${w[$((i + 1))]:-}" ;; --effort=*) e="${w[$i]#*=}" ;;
+      --advisor) a="${w[$((i + 1))]:-}" ;; --advisor=*) a="${w[$i]#*=}" ;;
+    esac
+  done
+  TXM="$m"; TXE="$e"; TXA="$a"
+}
+
 cmd_ls() {
   local color=0
   [ "${1:-}" = "--color" ] && color=1
@@ -303,7 +373,18 @@ cmd_ls() {
   [ "$color" = 1 ] && { Cy=$'\e[36;1m'; R=$'\e[0m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35;1m'; B=$'\e[34m'; Rd=$'\e[31;1m'; Dm=$'\e[2m'; }
   collect
   rc_index
-  local names n s now cwd age sid wact rupd rc rcc
+  local names n s now cwd cwdfull age sid wact rupd rc rcc tp spec w v c dimc mcell ecell acell width free cwdw
+  local -a icols=()
+  # MODEL / EFFORT / ADVISOR as far as they fit: the directory column keeps at least 16 (watch exports COLUMNS)
+  width="${COLUMNS:-}"
+  [ -n "$width" ] || { [ -t 1 ] && width="$(tput cols 2>/dev/null)"; }
+  case "$width" in '' | *[!0-9]*) width=120 ;; esac
+  free=$((width - 46)) # NAME STATE AGE RC before, the session id after
+  for spec in MODEL:10 EFFORT:6 ADVISOR:10; do
+    w="${spec#*:}"; [ $((free - w - 1)) -lt 16 ] && break
+    icols+=("$spec"); free=$((free - w - 1))
+  done
+  cwdw=$free; [ "$cwdw" -gt 60 ] && cwdw=60; [ "$cwdw" -lt 16 ] && cwdw=16
   names="$( { printf '%s\n' "${!WS[@]}"; printf '%s\n' "${!RS[@]}"; } | sed '/^$/d' | sort -u)"
   now="$(date +%s)"
   local cb=0 ci=0 cw=0 cd=0 cp=0 cs_=0 total=0
@@ -318,11 +399,13 @@ cmd_ls() {
   printf 'claude sessions: %d   %sBUSY %d%s  %s? DECIDE %d%s  %s* WAIT %d%s  %sIDLE %d%s  %sPARKED %d%s  SHELL %d   | up %s | / %s\n' \
     "$total" "$Y" "$cb" "$R" "$M" "$ci" "$R" "$Cy" "$cw" "$R" "$G" "$cd" "$R" "$B" "$cp" "$R" "$cs_" "$up" "$disk"
   [ -e "$STATE_DIR/LOOP-GUARD" ] && printf '%s!! crash-loop guard active: sessions are resumed WITHOUT the auto-continue prompt%s\n' "$Rd" "$R"
-  printf '%-18s %-7s %-5s %-3s %-44s %s\n' NAME STATE AGE RC CWD SESSION
+  printf '%-18s %-7s %-5s %-3s ' NAME STATE AGE RC
+  for spec in "${icols[@]}"; do printf '%-*s ' "${spec#*:}" "${spec%%:*}"; done
+  printf '%-*s %s\n' "$cwdw" CWD SESSION
   while IFS= read -r n; do
     [ -n "$n" ] || continue
     s="$(state_of "$n")"
-    cwd="${WC[$n]:-${RC[$n]:-}}"; cwd="${cwd/#$HOME/~}"
+    cwdfull="${WC[$n]:-${RC[$n]:-}}"; cwd="${cwdfull/#$HOME/~}"
     wact="${WA[$n]:-}"; rupd="${RU[$n]:-}"
     if [ -n "$wact" ]; then age="$(fmt_age $((now - wact)))"; elif [ -n "$rupd" ]; then age="$(fmt_age $((now - rupd)))"; else age="-"; fi
     sid="${RT[$n]:-}"
@@ -331,7 +414,20 @@ cmd_ls() {
     local col=""
     case "$s" in BUSY) col="$Y" ;; INPUT) col="$M" ;; WAIT) col="$Cy" ;; IDLE) col="$G" ;; PARKED) col="$B" ;; SHELL) col="$Rd" ;; esac
     rcc=""; case "$rc" in on) rcc="$G" ;; off) rcc="$Dm" ;; esac
-    printf '%-18s %s%-7s%s %-5s %s%-3s%s %-44s %s\n' "$n" "$col" "$s" "$R" "$age" "$rcc" "$rc" "$R" "${cwd:0:44}" "$sid"
+    printf '%-18s %s%-7s%s %-5s %s%-3s%s ' "$n" "$col" "$s" "$R" "$age" "$rcc" "$rc" "$R"
+    if [ "${#icols[@]}" -gt 0 ]; then
+      dimc=""
+      tp="$(reg_get "$n" transcript)"
+      if ! tx_info "$tp"; then cfg_info "$cwdfull" "${WX[$n]:-}"; dimc="$Dm"; fi # no answer yet: the configured values, dim
+      fmt_model "$TXM"; mcell="$FM"; ecell="$TXE"
+      if [ "$TXA" = off ]; then acell=off; else fmt_model "$TXA"; acell="$FM"; fi
+      for spec in "${icols[@]}"; do
+        c="$dimc"
+        case "${spec%%:*}" in MODEL) v="$mcell" ;; EFFORT) v="$ecell" ;; ADVISOR) v="$acell"; [ "$acell" = off ] && c="$Dm" ;; esac
+        printf '%s%-*s%s ' "$c" "${spec#*:}" "$v" "$R"
+      done
+    fi
+    printf '%-*s %s\n' "$cwdw" "${cwd:0:$cwdw}" "$sid"
   done <<<"$names"
   return 0
 }
@@ -383,10 +479,13 @@ cmd_close() {
   local name="${1:-}"
   [ -n "$name" ] || die "usage: roost close NAME"
   local wid pcmd
+  rm -f "$SESS_DIR/$name.json" # first: this may run inside the window that is closed
   wid="$(wid_of "$name")"
   if [ -n "$wid" ]; then
     pcmd="$(tm display-message -p -t "$wid" '#{pane_current_command}' 2>/dev/null)"
     if [ "$pcmd" = claude ]; then
+      # Escape cancels a pending "?" prompt instead of answering it; the pause keeps it from reading as Alt+/
+      tm send-keys -t "$wid" Escape; sleep 0.3
       tm send-keys -t "$wid" -l '/exit'; tm send-keys -t "$wid" Enter
       for _ in 1 2 3 4 5 6 7 8 9 10; do
         sleep 0.5
@@ -395,7 +494,7 @@ cmd_close() {
     fi
     tm kill-window -t "$wid" 2>/dev/null
   fi
-  rm -f "$SESS_DIR/$name.json"
+  rm -f "$SESS_DIR/$name.json" # again: a hook that fired while claude was exiting may have written it back
   echo "closed $name"
 }
 
@@ -453,7 +552,7 @@ cmd_doctor() {
 # Runs new / hook / ls / title / restore / close against a throw-away tmux server (own socket) with its own state, config
 # and Claude dir and a fake `claude`. The caller's shell is usually a pane of the REAL server and the hook follows
 # $TMUX / $TMUX_PANE, so those are dropped first and handed to the hook only for the test windows.
-ST_PIDS=(); ST_T=""; ST_SOCK=""; ST_SPATH=""; ST_S=rstest; ST_OK=0; ST_BAD=0
+ST_PIDS=(); ST_T=""; ST_SOCK=""; ST_SPATH=""; ST_COLS=""; ST_S=rstest; ST_OK=0; ST_BAD=0
 st_tm() { env -u TMUX -u TMUX_PANE tmux -L "$ST_SOCK" "$@"; }
 st_cleanup() {
   [ -n "$ST_SOCK" ] && st_tm kill-server 2>/dev/null # never without our own socket name: that would kill the real server
@@ -465,7 +564,7 @@ st_cleanup() {
 st_roost() {
   env -u TMUX -u TMUX_PANE ROOST_TMUX_SOCKET="$ST_SOCK" ROOST_TMUX_SESSION="$ST_S" ROOST_STATE_DIR="$ST_T/state" \
     ROOST_CONF_DIR="$ST_T/conf" CLAUDE_CONFIG_DIR="$ST_T/claude" ROOST_CLAUDE_BIN="$ST_T/bin/claude" \
-    ROOST_PROJECT_ROOT="$ST_T/proj" ROOST_NO_ATTACH=1 ROOST_STAGGER=0 ROOST_AUTOCONTINUE=1 "$SELF" "$@"
+    ROOST_PROJECT_ROOT="$ST_T/proj" ROOST_NO_ATTACH=1 ROOST_STAGGER=0 ROOST_AUTOCONTINUE=1 COLUMNS="${ST_COLS:-200}" "$SELF" "$@"
 }
 st_wid() { st_tm list-windows -t "$ST_S" -F '#{window_id}|#{@roost_name}' 2>/dev/null | awk -F'|' -v n="$1" '$2==n{print $1; exit}'; }
 st_opt() { st_tm display-message -p -t "$(st_wid "$1")" "#{$2}" 2>/dev/null; }
@@ -485,7 +584,7 @@ st_hook() { # PANE EVENT [JSON merged into the payload] SESSION: the hook as Cla
   local pane="$1" ev="$2" x="${3:-}" sid="${4:-sid-1111}"
   [ -n "$x" ] || x='{}'
   jq -n -c --arg sid "$sid" --arg cwd "$ST_T/proj/${5:-demo}" --arg tp "$ST_T/tr.jsonl" --argjson x "$x" \
-    '{session_id:$sid, cwd:$cwd, transcript_path:$tp, permission_mode:"auto"} + $x' >"$ST_T/in.json"
+    '{session_id:$sid, cwd:$cwd, transcript_path:$tp} + $x' >"$ST_T/in.json"
   HOUT="$(env TMUX="$ST_SPATH,$ST_SPID,0" TMUX_PANE="$pane" ROOST_STATE_DIR="$ST_T/state" "$ST_HOOK" "$ev" <"$ST_T/in.json" 2>&1)"
   [ -z "$HOUT" ] && [ "$?" = 0 ] || ST_QUIET=0
 }
@@ -497,7 +596,12 @@ st_rcfile() { # PID PROCSTART SESSION-ID BRIDGE [extra JSON]: one file of Claude
   jq -n -c --argjson pid "$1" --arg ps "$2" --arg sid "$3" --arg br "$4" --argjson x "$x" \
     '{pid:$pid, procStart:$ps, sessionId:$sid} + (if $br == "" then {} else {bridgeSessionId:$br} end) + $x' >"$ST_T/claude/sessions/$1.json"
 }
-st_regfile() { jq -n -c --arg n "$1" --arg s "$2" --argjson now "$(date +%s)" '{name:$n, cwd:"/", session_id:$s, transcript:"", state:"idle", updated:$now}' >"$ST_T/state/sessions/$1.json"; }
+st_regfile() { jq -n -c --arg n "$1" --arg s "$2" --arg tp "${3:-}" --argjson now "$(date +%s)" '{name:$n, cwd:"/", session_id:$s, transcript:$tp, state:"idle", updated:$now}' >"$ST_T/state/sessions/$1.json"; }
+st_asst() { # MODEL EFFORT [extra JSON]: one assistant line of a transcript
+  local x="${3:-}"; [ -n "$x" ] || x='{}'
+  jq -n -c --arg m "$1" --arg e "$2" --argjson x "$x" '{type:"assistant", message:{model:$m, content:"x"}, effort:$e} + $x'
+}
+st_cell() { st_row "$1" | cut -c"$2" | sed 's/[[:space:]]*$//'; } # a column of `ls` at COLUMNS=200: MODEL 38-47, EFFORT 49-54, ADVISOR 56-65
 st_alive() { sleep 600 & ST_PIDS+=("$!"); ST_LAST=$!; }
 
 cmd_selftest() {
@@ -509,15 +613,19 @@ cmd_selftest() {
   ST_T="$(mktemp -d)" || die "selftest: no temp dir"
   ST_SOCK="roost-selftest-$$"; ST_QUIET=1; declare -gA ST_SID=([demo]=sid-1111 [demo2]=sid-2222)
   trap st_cleanup EXIT
-  mkdir -p "$ST_T"/{state/sessions,claude/sessions,bin,proj/demo,proj/demo2}
+  mkdir -p "$ST_T"/{state/sessions,claude/sessions,bin,tx,proj/demo,proj/demo2,proj/demo4}
   echo '{}' >"$ST_T/tr.jsonl"
   # a fake claude: logs its arguments, then shows up as "claude" (tmux reads argv[0]) and idles
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >>"$(dirname "$0")/args.log"' 'exec -a claude sleep 86400' >"$ST_T/bin/claude"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >>"$(dirname "$0")/args.log"' \
+    'printf "%s|%s|%s|%s|%s\n" "${CLAUDECODE:-}" "${CLAUDE_CODE_SESSION_ID:-}" "${CLAUDE_CODE_KEEP:-}" "${NO_COLOR:-}" "${ROOST_STATE_DIR:-}" >>"$(dirname "$0")/env.log"' \
+    'exec -a claude sleep 86400' >"$ST_T/bin/claude"
   chmod +x "$ST_T/bin/claude"
-  env -u TMUX -u TMUX_PANE ROOST_STATE_DIR="$ST_T/state" tmux -L "$ST_SOCK" -f /dev/null new-session -d -s "$ST_S" -n dash 'sleep 86400' 9>&-
+  env -u TMUX -u TMUX_PANE -u ROOST_STATE_DIR CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=leak CLAUDE_CODE_KEEP=yes NO_COLOR=1 \
+    tmux -L "$ST_SOCK" -f /dev/null new-session -d -s "$ST_S" -n dash 'sleep 86400' 9>&-
   st_tm has-session -t "$ST_S" || die "selftest: could not start the test tmux server"
   ST_SPATH="$(st_tm display-message -p '#{socket_path}')"; ST_SPID="$(st_tm display-message -p '#{pid}')"
-  local log="$ST_T/bin/args.log" out sid d
+  local log="$ST_T/bin/args.log" elog="$ST_T/bin/env.log" out sid d old envs
+  envs="ROOST_TMUX_SOCKET=$ST_SOCK ROOST_TMUX_SESSION=$ST_S ROOST_CONF_DIR=$ST_T/conf CLAUDE_CONFIG_DIR=$ST_T/claude ROOST_CLAUDE_BIN=$ST_T/bin/claude ROOST_PROJECT_ROOT=$ST_T/proj ROOST_NO_ATTACH=1 ROOST_STAGGER=0"
 
   echo "== new / ls =="
   st_roost new 'bad name' >/dev/null 2>&1; st_expect "new rejects a name with a space" 1 "$?"
@@ -529,11 +637,18 @@ cmd_selftest() {
   st_has "new: default flags (--permission-mode auto)" "--permission-mode auto" "$(tail -n1 "$log" 2>/dev/null)"
   st_expect "config defaults are seeded" "--permission-mode auto" "$(cat "$ST_T/conf/claude-flags" 2>/dev/null)"
   st_expect "ls: IDLE" IDLE "$(st_state demo)"
+  st_expect "env: CLAUDECODE and the caller's ids are dropped, user vars kept, state dir handed over" "||yes||$ST_T/state" "$(tail -n1 "$elog")"
+  st_tm set-environment -g -r CLAUDECODE
+  st_roost new demo3 >/dev/null 2>&1; st_until st_claude demo3
+  st_expect "env: without CLAUDECODE nothing is dropped" "|leak|yes|1|$ST_T/state" "$(tail -n1 "$elog")"
+  st_tm kill-window -t "$(st_wid demo3)"
 
   echo "== hook cycle (demo) =="
   st_ev demo start;                                         st_expect "start -> idle" idle "$(st_opt demo @roost_state)"
+  st_expect "no permission mode seen yet -> auto" auto "$(st_reg demo permission_mode)"
   st_expect "start writes the registry" sid-1111 "$(st_reg demo session_id)"
-  st_ev demo busy;                                          st_expect "busy -> busy" busy "$(st_opt demo @roost_state)"
+  st_ev demo busy '{"permission_mode":"plan"}';             st_expect "busy -> busy" busy "$(st_opt demo @roost_state)"
+  st_expect "permission_mode is recorded" plan "$(st_reg demo permission_mode)"
   st_expect "busy: registry state" busy "$(st_reg demo state)"
   st_ev demo attention '{"notification_type":"permission_prompt"}'
   st_expect "permission prompt -> attention" attention "$(st_opt demo @roost_state)"
@@ -541,6 +656,7 @@ cmd_selftest() {
   st_ev demo resume;                                        st_expect "PostToolUse after a prompt -> busy" busy "$(st_opt demo @roost_state)"
   st_ev demo idle;                                          st_expect "Stop -> waiting" waiting "$(st_opt demo @roost_state)"
   st_expect "Stop: registry state idle" idle "$(st_reg demo state)"
+  st_expect "an event without permission_mode keeps the last one" plan "$(st_reg demo permission_mode)"
   st_ev demo resume;                                        st_expect "resume does nothing unless attention" waiting "$(st_opt demo @roost_state)"
   st_ev demo busy; st_ev demo attention '{"notification_type":"idle_prompt"}'
   st_expect "idle_prompt -> waiting" waiting "$(st_opt demo @roost_state)"
@@ -572,6 +688,7 @@ cmd_selftest() {
   st_has "restore: busy session gets the continue prompt" "resume=yes, continue-prompt=yes" "$out"
   st_until st_claude demo
   st_has "restore: claude gets --resume <id>" "--resume sid-1111" "$(tail -n1 "$log")"
+  st_has "restore: ... and the saved permission mode" "--permission-mode plan" "$(tail -n1 "$log")"
   st_has "restore: ... and the resume prompt" "restarted unexpectedly" "$(tail -n1 "$log")"
   st_has "restore: nothing to do for a running session" "nothing to restore" "$(st_roost restore demo)"
   st_tm kill-window -t "$(st_wid demo2)"
@@ -582,8 +699,12 @@ cmd_selftest() {
   pkill -TERM -P "$(st_opt demo2 pane_pid)" # claude exits (a Ctrl-C would also end the wrapper shell: no SHELL window)
   st_until eval '[ "$(st_opt demo2 pane_current_command)" != claude ]'
   st_expect "claude exited -> SHELL" SHELL "$(st_state demo2)"
-  st_has "restore recreates a SHELL window" "restored demo2" "$(st_roost restore demo2)"
-  st_until st_claude demo2; st_expect "... and claude runs again" claude "$(st_opt demo2 pane_current_command)"
+  old="$(st_wid demo2)"
+  # typed into the exited window itself: the new window must exist before the old one, and the shell running this, goes
+  st_tm send-keys -t "$old" -l "env $envs \"$SELF\" restore demo2"; st_tm send-keys -t "$old" Enter
+  st_until eval '[ -n "$(st_wid demo2)" ] && [ "$(st_wid demo2)" != "$old" ]'; st_until st_claude demo2
+  st_expect "restore typed in the exited window: a new window runs claude" claude "$(st_opt demo2 pane_current_command)"
+  st_expect "... and the old window is gone" "" "$(st_tm list-windows -t "$ST_S" -F '#{window_id}' | grep -Fx "$old")"
 
   echo "== end / close / forget =="
   st_ev demo2 end '{"reason":"other"}';                     st_expect "SessionEnd other keeps the entry" sid-2222 "$(st_reg demo2 session_id)"
@@ -605,6 +726,27 @@ cmd_selftest() {
   st_expect "RC empty for a reused pid" "" "$(st_rc rc-reuse)"
   st_expect "RC empty for a dead pid" "" "$(st_rc rc-dead)"
   st_expect "RC follows a parked job" on "$(st_rc rc-job)"
+
+  echo "== model / effort / advisor columns =="
+  printf '%s\n' '{"type":"user","message":{"content":"hi"}}' "$(st_asst claude-opus-5-5 max '{"advisorModel":"claude-sonnet-5-5"}')" \
+    "$(st_asst claude-haiku-5-5 low '{"isSidechain":true}')" >"$ST_T/tx/main.jsonl"
+  st_asst 'claude-sonnet-5-5[1m]' high '{"advisorModel":""}' >"$ST_T/tx/off.jsonl"
+  st_asst claude-opus-5-5 low >"$ST_T/tx/nokey.jsonl"
+  { st_asst claude-opus-5-5 xhigh "{\"pad\":\"$(head -c 100000 /dev/zero | tr '\0' x)\"}"; echo '{"type":"user"}'; } >"$ST_T/tx/big.jsonl"
+  echo '{"type":"user","message":{"content":"no answer yet"}}' >"$ST_T/tx/none.jsonl"
+  echo '{"model":"opus","effortLevel":"xhigh","advisorModel":"opus"}' >"$ST_T/claude/settings.json"
+  for d in main off nokey big none; do st_regfile "tx-$d" "sid-tx-$d" "$ST_T/tx/$d.jsonl"; done
+  st_expect "columns: last main-thread entry, subagent skipped" "opus 5.5|max|sonnet 5.5" "$(st_cell tx-main 38-47)|$(st_cell tx-main 49-54)|$(st_cell tx-main 56-65)"
+  st_expect "columns: [1m] suffix dropped, empty advisorModel is off" "sonnet 5.5|high|off" "$(st_cell tx-off 38-47)|$(st_cell tx-off 49-54)|$(st_cell tx-off 56-65)"
+  st_expect "columns: no advisorModel key -> empty" "opus 5.5|low|" "$(st_cell tx-nokey 38-47)|$(st_cell tx-nokey 49-54)|$(st_cell tx-nokey 56-65)"
+  st_expect "columns: an entry larger than the first read is still found" "opus 5.5|xhigh" "$(st_cell tx-big 38-47)|$(st_cell tx-big 49-54)"
+  st_expect "columns: no answer yet -> the configured values" "opus|xhigh|opus" "$(st_cell tx-none 38-47)|$(st_cell tx-none 49-54)|$(st_cell tx-none 56-65)"
+  st_roost new demo4 --model claude-sonnet-5-5 --effort low >/dev/null 2>&1; st_until st_claude demo4
+  st_expect "columns: launch flags win over settings until the first answer" "sonnet 5.5|low|opus" "$(st_cell demo4 38-47)|$(st_cell demo4 49-54)|$(st_cell demo4 56-65)"
+  st_has "columns: all three at 200 wide" ADVISOR "$(st_roost ls | grep '^NAME')"
+  ST_COLS=80; out="$(st_roost ls | grep '^NAME')"; ST_COLS=
+  st_has "columns: narrow terminal keeps MODEL and EFFORT" "EFFORT" "$out"
+  case "$out" in *ADVISOR*) st_expect "columns: ... and drops ADVISOR first" dropped shown ;; *) st_expect "columns: ... and drops ADVISOR first" dropped dropped ;; esac
 
   echo
   st_cleanup; ST_T=""; ST_SOCK=""; ST_SPATH=""; trap - EXIT
