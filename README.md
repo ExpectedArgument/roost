@@ -64,18 +64,13 @@ Claude Code hooks knows the state and id of every session, and one command (or t
 
 ```mermaid
 flowchart LR
-    subgraph mux["tmux / psmux session 'roost'"]
-        dash["dash window"]
-        w1["window: claude (api)"]
-        w2["window: claude (docs)"]
-    end
-    w1 -- "hook event + JSON on stdin" --> hook["roost-hook<br/>silent, always exit 0"]
-    hook -- "atomic write" --> reg[("registry<br/>sessions/NAME.json")]
-    hook -- "state glyph" --> mux
-    reg --> ui["dashboard · status bar · tab title"]
-    cc[("~/.claude/sessions/PID.json<br/>session transcripts")] -.->|read-only| ui
+    claude(["claude<br/>one per window"]) -- "hook event + JSON" --> hook["roost-hook<br/>silent · always exit 0"]
+    hook -- "write, then rename" --> reg[("registry<br/>sessions/NAME.json")]
+    hook -- "state glyph" --> win["tmux / psmux<br/>window"]
+    reg --> ui["dashboard<br/>status bar · tab title"]
+    cc[("Claude Code files<br/>sessions/PID.json<br/>transcripts")] -.->|read-only| ui
     reg --> restore["roost restore"]
-    restore -- "claude --resume ID" --> mux
+    restore -- "claude --resume ID" --> claude
 ```
 
 **Hooks.** Claude Code calls `roost-hook` on `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`, `PostToolUse` and
@@ -87,22 +82,20 @@ PowerShell only while the session shows `?`.
 ```mermaid
 stateDiagram-v2
     direction LR
-    state "○ quiet" as quiet
-    state "● working" as working
-    state "? needs you" as ask
-    state "* your turn" as turn
-    state "⏸ parked" as parked
+    state "quiet ○" as quiet
+    state "working ●" as working
+    state "needs you ?" as ask
+    state "your turn *" as turn
+    state "parked ⏸" as parked
     [*] --> quiet: SessionStart
     quiet --> working: UserPromptSubmit
-    turn --> working: UserPromptSubmit
-    working --> ask: Notification (permission or question)
-    ask --> working: PostToolUse (answered)
+    working --> ask: permission prompt or question
+    ask --> working: answered (PostToolUse)
     working --> turn: Stop
-    ask --> turn: Stop
-    working --> parked: window closed, reboot, power loss
-    turn --> parked: window closed, reboot
-    parked --> working: restore of a busy session (resume + continue prompt)
-    parked --> quiet: restore of an idle session
+    turn --> working: UserPromptSubmit
+    working --> parked: reboot, power loss, window closed
+    parked --> working: roost restore, was busy (+ continue prompt)
+    parked --> quiet: roost restore, was idle
     turn --> [*]: /exit
 ```
 
