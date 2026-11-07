@@ -1,0 +1,1 @@
+The system restarted unexpectedly (power loss or freeze) and this session was restored automatically. Pick up the interrupted work where it stopped: first quickly verify the current state (git status/diff, running processes, half-written output), do not redo finished work, then continue.

@@ -1,0 +1,392 @@
+#!/usr/bin/env bash
+# roost - Claude Code sessions on tmux: one place to see/attach all of them, resumed automatically after
+# a power loss / reboot.
+#
+#   roost                          attach to the dashboard (Ctrl-b w = pick a session, Ctrl-b d = detach)
+#   roost new NAME [DIR] [claude args]   new session window, e.g.  roost new vehicle-ros -c   (continue last chat)
+#                                     DIR defaults to $ROOST_PROJECT_ROOT/NAME if that directory exists, else the current directory
+#                                     --connectors keeps claude.ai connectors enabled for this session
+#   roost ls                       list sessions: BUSY / INPUT / IDLE / PARKED (not running) / SHELL (claude exited)
+#   roost restore [NAME]           resume parked sessions (runs automatically at boot via roost-restore.service)
+#   roost close NAME               exit a session cleanly and forget it (typing /exit inside does the same)
+#   roost forget NAME              drop a registry entry only
+#   roost adopt NAME               register the current tmux window (run inside tmux, claude already running)
+#   roost status                   one-line summary for the tmux status bar
+#   roost doctor                   health checks (service, hooks, watchdog, sysctl)
+#
+# Config: ~/.config/roost/{claude-flags,resume-prompt.txt,connectors-allow}   State: ~/.local/state/roost
+# Registry entries are written by ~/.claude/hooks/roost-hook.sh (SessionStart/UserPromptSubmit/Stop/...).
+set -u
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+STATE_DIR="${ROOST_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/roost}"
+CONF_DIR="${ROOST_CONF_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/roost}"
+SESS_DIR="$STATE_DIR/sessions"
+TS="${ROOST_TMUX_SESSION:-roost}"
+CLAUDE_BIN="${ROOST_CLAUDE_BIN:-claude}"
+ROOT="${ROOST_PROJECT_ROOT:-$HOME}"
+STAGGER="${ROOST_STAGGER:-6}"
+
+mkdir -p "$SESS_DIR" "$CONF_DIR" 2>/dev/null
+[ -e "$CONF_DIR/claude-flags" ] || printf -- '--permission-mode auto\n' >"$CONF_DIR/claude-flags"
+[ -e "$CONF_DIR/connectors-allow" ] || printf '*\n' >"$CONF_DIR/connectors-allow"
+[ -e "$CONF_DIR/resume-prompt.txt" ] || cat >"$CONF_DIR/resume-prompt.txt" <<'EOF'
+The system restarted unexpectedly (power loss or freeze) and this session was restored automatically. Pick up the interrupted work where it stopped: first quickly verify the current state (git status/diff, running processes, half-written output), do not redo finished work, then continue.
+EOF
+
+# 9>&- : never leak the restore lock fd into a tmux server started from here (it would hold the lock forever)
+tm() { tmux ${ROOST_TMUX_SOCKET:+-L "$ROOST_TMUX_SOCKET"} "$@" 9>&-; }
+die() { echo "roost: $*" >&2; exit 1; }
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
+
+FLAGS=()
+load_flags() {
+  local l
+  l="$(grep -v '^[[:space:]]*#' "$CONF_DIR/claude-flags" 2>/dev/null | tr '\n' ' ')"
+  read -r -a FLAGS <<<"$l"
+}
+RES=()
+mode_flags() { # $1 = permission mode override (may be empty) -> RES
+  local m="$1" i=0
+  RES=()
+  while [ "$i" -lt "${#FLAGS[@]}" ]; do
+    # drop the default permission mode only when a saved mode replaces it
+    if [ -n "$m" ] && [ "${FLAGS[$i]}" = "--permission-mode" ]; then i=$((i + 2)); continue; fi
+    RES+=("${FLAGS[$i]}"); i=$((i + 1))
+  done
+  [ -n "$m" ] && RES+=(--permission-mode "$m")
+  return 0
+}
+# connectors-allow: one project name per line keeps claude.ai connectors on for it; a line with just * keeps them on everywhere
+conn_allowed() { grep -qx -e "$1" -e '\*' "$CONF_DIR/connectors-allow" 2>/dev/null; }
+
+ensure_server() {
+  tm has-session -t "$TS" 2>/dev/null && return 0
+  tm -u new-session -d -s "$TS" -n dash "exec watch -t -n 5 -c '$SELF' ls --color" 2>/dev/null
+  tm has-session -t "$TS" 2>/dev/null || die "tmux server could not be started"
+  echo "roost: note - tmux server was not running (sudo systemctl start roost-tmux to run it as a service)" >&2
+}
+wid_of() { tm list-windows -t "$TS" -F '#{window_id}|#{@roost_name}' 2>/dev/null | awk -F'|' -v n="$1" '$2==n{print $1; exit}'; }
+reg_get() { jq -r --arg k "$2" '.[$k] // empty' "$SESS_DIR/$1.json" 2>/dev/null; }
+reg_names() { local f; for f in "$SESS_DIR"/*.json; do [ -e "$f" ] && basename "$f" .json; done; return 0; }
+
+launch() { # name cwd sid prompt conn mode [extra claude args...]  -> prints window id
+  local name="$1" cwd="$2" sid="$3" prompt="$4" conn="$5" mode="$6"; shift 6
+  local -a args
+  mode_flags "$mode"; args=("${RES[@]}")
+  [ -n "$sid" ] && args+=(--resume "$sid")
+  args+=("$@")
+  [ -n "$prompt" ] && args+=("$prompt")
+  local envp=""
+  [ "$conn" = 1 ] || envp="ENABLE_CLAUDEAI_MCP_SERVERS=false "
+  local cmd inner
+  cmd="${envp}$(printf '%q ' "$CLAUDE_BIN" "${args[@]}")"
+  inner="export XDG_RUNTIME_DIR=/run/user/\$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus; $cmd; echo; echo '[roost] claude exited - plain shell now (roost close $name removes this window)'; exec bash -l"
+  local -a ef=()
+  [ -n "${DISPLAY:-}" ] && ef+=(-e "DISPLAY=$DISPLAY")
+  [ -n "${XAUTHORITY:-}" ] && ef+=(-e "XAUTHORITY=$XAUTHORITY")
+  local wid
+  wid="$(tm new-window -d -P -F '#{window_id}' -t "$TS:" -n "$name" -c "$cwd" "${ef[@]}" bash -lic "$inner")" || return 1
+  tm set-option -w -q -t "$wid" @roost_managed 1
+  tm set-option -w -q -t "$wid" @roost_name "$name"
+  tm set-option -w -q -t "$wid" @roost_state idle
+  [ "$conn" = 1 ] && tm set-option -w -q -t "$wid" @roost_conn 1
+  echo "$wid"
+}
+
+attach_to() { # $1 = window id or empty
+  if [ -n "${TMUX:-}" ]; then
+    [ -n "$1" ] && tm select-window -t "$1"
+    return 0
+  fi
+  [ "${ROOST_NO_ATTACH:-}" = 1 ] && return 0
+  [ -t 0 ] && [ -t 1 ] || die "not a terminal - from another machine use:  ssh -t HOST roost"
+  local -a sel=()
+  [ -n "$1" ] && sel=(\; select-window -t "$1")
+  exec tmux ${ROOST_TMUX_SOCKET:+-L "$ROOST_TMUX_SOCKET"} new-session -t "$TS" -s "view-$$" \; set-option destroy-unattached on "${sel[@]}"
+}
+
+cmd_attach() {
+  ensure_server
+  local wid=""
+  [ -n "${1:-}" ] && { wid="$(wid_of "$1")"; [ -n "$wid" ] || die "no session named '$1' (roost ls)"; }
+  if [ -n "${TMUX:-}" ] && [ -z "$wid" ]; then tm choose-tree -Zw; return 0; fi
+  attach_to "$wid"
+}
+
+cmd_new() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "usage: roost new NAME [DIR] [claude args, e.g. -c | -r]"
+  shift
+  valid_name "$name" || die "bad NAME (letters, digits, . _ -)"
+  local dir="" conn=0
+  local -a extra=()
+  if [ $# -gt 0 ] && [[ "$1" != -* ]]; then dir="$1"; shift; fi
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --connectors) conn=1 ;;
+      --) ;;
+      *) extra+=("$1") ;;
+    esac
+    shift
+  done
+  if [ -z "$dir" ]; then
+    if [ -d "$ROOT/$name" ]; then dir="$ROOT/$name"; else dir="$PWD"; fi
+  fi
+  dir="$(cd "$dir" 2>/dev/null && pwd -P)" || die "no such directory: $dir"
+  load_flags
+  ensure_server
+  conn_allowed "$name" && conn=1
+  local wid
+  wid="$(wid_of "$name")"
+  if [ -n "$wid" ]; then
+    echo "session '$name' already exists - switching to it"
+  else
+    if [ "${#extra[@]}" -eq 0 ] && [ -e "$SESS_DIR/$name.json" ]; then
+      echo "'$name' is parked - resuming it"
+      cmd_restore "$name" >/dev/null
+      wid="$(wid_of "$name")"
+    fi
+    if [ -z "$wid" ]; then
+      wid="$(launch "$name" "$dir" "" "" "$conn" "" "${extra[@]}")" || die "could not create window"
+    fi
+  fi
+  attach_to "$wid"
+}
+
+wait_net() {
+  local deadline=$((SECONDS + ${ROOST_NET_WAIT:-600})) code
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    code="$(curl -s -o /dev/null -m 6 -w '%{http_code}' "${ROOST_NET_URL:-https://api.anthropic.com/}" 2>/dev/null)" || code=000
+    [ "$code" != "000" ] && return 0
+    sleep 5
+  done
+  return 1
+}
+
+cmd_restore() {
+  local boot=0 only=""
+  while [ $# -gt 0 ]; do
+    case "$1" in --boot) boot=1 ;; *) only="$1" ;; esac
+    shift
+  done
+  exec 9>"$STATE_DIR/restore.lock"
+  flock -n 9 || die "another restore is running"
+  load_flags
+  local autocont="${ROOST_AUTOCONTINUE:-1}"
+  if [ "$boot" = 1 ]; then
+    local up now n
+    up="${ROOST_UPTIME_OVERRIDE:-$(cut -d. -f1 /proc/uptime)}"
+    if [ "$up" -lt 900 ]; then # a real boot: crash-loop guard (>=3 boots in 30 min -> resume only, no auto prompt)
+      now="$(date +%s)"
+      echo "$now" >>"$STATE_DIR/boots.log"
+      awk -v t=$((now - 86400)) '$1>t' "$STATE_DIR/boots.log" >"$STATE_DIR/boots.log.new" && mv "$STATE_DIR/boots.log.new" "$STATE_DIR/boots.log"
+      n="$(awk -v t=$((now - 1800)) '$1>t' "$STATE_DIR/boots.log" | wc -l)"
+      if [ "$n" -ge 3 ]; then
+        autocont=0; touch "$STATE_DIR/LOOP-GUARD"
+        echo "crash-loop guard: $n boots in 30 min -> auto-continue disabled (sessions are resumed, not prompted)"
+      else
+        rm -f "$STATE_DIR/LOOP-GUARD"
+      fi
+    fi
+    wait_net || echo "network still unreachable - resuming anyway"
+  fi
+  ensure_server
+  local name cwd sid tp st mode conn wid pcmd resume_sid prompt c any=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ -n "$only" ] && [ "$only" != "$name" ] && continue
+    cwd="$(reg_get "$name" cwd)"; sid="$(reg_get "$name" session_id)"; tp="$(reg_get "$name" transcript)"
+    st="$(reg_get "$name" state)"; mode="$(reg_get "$name" permission_mode)"; conn="$(reg_get "$name" connectors)"
+    wid="$(wid_of "$name")"
+    if [ -n "$wid" ]; then
+      pcmd="$(tm display-message -p -t "$wid" '#{pane_current_command}' 2>/dev/null)"
+      [ "$pcmd" = claude ] && continue # already running
+      tm kill-window -t "$wid" 2>/dev/null # leftover plain shell: recreate
+    fi
+    if [ ! -d "$cwd" ]; then echo "skip $name: $cwd no longer exists"; continue; fi
+    case "$mode" in default|acceptEdits|plan|auto|dontAsk) ;; *) mode="" ;; esac
+    resume_sid=""; prompt=""
+    if [ -n "$sid" ] && [ -n "$tp" ] && [ -s "$tp" ]; then resume_sid="$sid"; fi
+    if [ -n "$resume_sid" ] && [ "$st" = busy ] && [ "$autocont" = 1 ]; then prompt="$(cat "$CONF_DIR/resume-prompt.txt")"; fi
+    if [ "$conn" = true ] || conn_allowed "$name"; then c=1; else c=0; fi
+    if launch "$name" "$cwd" "$resume_sid" "$prompt" "$c" "$mode" >/dev/null; then
+      echo "restored $name (resume=$([ -n "$resume_sid" ] && echo yes || echo no), continue-prompt=$([ -n "$prompt" ] && echo yes || echo no))"
+      any=1
+      [ "$boot" = 1 ] && sleep "$STAGGER"
+    fi
+  done < <(reg_names)
+  [ "$any" = 0 ] && echo "nothing to restore"
+  return 0
+}
+
+fmt_age() { # seconds -> 12s / 5m / 3h / 2d
+  local s="$1"
+  if [ "$s" -lt 60 ]; then echo "${s}s"
+  elif [ "$s" -lt 3600 ]; then echo "$((s / 60))m"
+  elif [ "$s" -lt 86400 ]; then echo "$((s / 3600))h"
+  else echo "$((s / 86400))d"; fi
+}
+
+collect() { # fills WS WP WA WC (live windows) and RS RC RU RT (registry)
+  declare -gA WS=() WP=() WA=() WC=() RS=() RC=() RU=() RT=()
+  if tm has-session -t "$TS" 2>/dev/null; then
+    local wid managed name state pcmd act path
+    while IFS='|' read -r wid managed name state pcmd act path; do
+      [ "$managed" = 1 ] || continue
+      WS[$name]="$state"; WP[$name]="$pcmd"; WA[$name]="$act"; WC[$name]="$path"
+    done < <(tm list-windows -t "$TS" -F '#{window_id}|#{@roost_managed}|#{@roost_name}|#{@roost_state}|#{pane_current_command}|#{window_activity}|#{pane_current_path}')
+  fi
+  local n
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    RS[$n]="$(reg_get "$n" state)"; RC[$n]="$(reg_get "$n" cwd)"; RU[$n]="$(reg_get "$n" updated)"; RT[$n]="$(reg_get "$n" session_id)"
+  done < <(reg_names)
+}
+
+state_of() { # name -> BUSY|INPUT|IDLE|SHELL|PARKED
+  local n="$1"
+  if [ -n "${WP[$n]+x}" ]; then
+    if [ "${WP[$n]}" != claude ]; then echo SHELL; return; fi
+    case "${WS[$n]}" in busy) echo BUSY ;; attention) echo INPUT ;; waiting) echo WAIT ;; *) echo IDLE ;; esac
+  else
+    echo PARKED
+  fi
+}
+
+cmd_ls() {
+  local color=0
+  [ "${1:-}" = "--color" ] && color=1
+  [ -t 1 ] && color=1
+  local R="" Y="" G="" M="" B="" Rd="" Cy=""
+  [ "$color" = 1 ] && { Cy=$'\e[36;1m'; R=$'\e[0m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35;1m'; B=$'\e[34m'; Rd=$'\e[31;1m'; }
+  collect
+  local names n s now cwd age sid wact rupd
+  names="$( { printf '%s\n' "${!WS[@]}"; printf '%s\n' "${!RS[@]}"; } | sed '/^$/d' | sort -u)"
+  now="$(date +%s)"
+  local cb=0 ci=0 cw=0 cd=0 cp=0 cs_=0 total=0
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    total=$((total + 1))
+    case "$(state_of "$n")" in BUSY) cb=$((cb + 1)) ;; INPUT) ci=$((ci + 1)) ;; WAIT) cw=$((cw + 1)) ;; IDLE) cd=$((cd + 1)) ;; PARKED) cp=$((cp + 1)) ;; SHELL) cs_=$((cs_ + 1)) ;; esac
+  done <<<"$names"
+  local up disk
+  up="$(awk '{printf "%dd%02dh", $1/86400, ($1%86400)/3600}' /proc/uptime)"
+  disk="$(df --output=pcent / | tail -1 | tr -d ' ')"
+  printf 'claude sessions: %d   %sBUSY %d%s  %s? DECIDE %d%s  %s* WAIT %d%s  %sIDLE %d%s  %sPARKED %d%s  SHELL %d   | up %s | / %s\n' \
+    "$total" "$Y" "$cb" "$R" "$M" "$ci" "$R" "$Cy" "$cw" "$R" "$G" "$cd" "$R" "$B" "$cp" "$R" "$cs_" "$up" "$disk"
+  [ -e "$STATE_DIR/LOOP-GUARD" ] && printf '%s!! crash-loop guard active: sessions are resumed WITHOUT the auto-continue prompt%s\n' "$Rd" "$R"
+  printf '%-18s %-7s %-5s %-44s %s\n' NAME STATE AGE CWD SESSION
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    s="$(state_of "$n")"
+    cwd="${WC[$n]:-${RC[$n]:-}}"; cwd="${cwd/#$HOME/~}"
+    wact="${WA[$n]:-}"; rupd="${RU[$n]:-}"
+    if [ -n "$wact" ]; then age="$(fmt_age $((now - wact)))"; elif [ -n "$rupd" ]; then age="$(fmt_age $((now - rupd)))"; else age="-"; fi
+    sid="${RT[$n]:-}"; sid="${sid:0:8}"
+    local col=""
+    case "$s" in BUSY) col="$Y" ;; INPUT) col="$M" ;; WAIT) col="$Cy" ;; IDLE) col="$G" ;; PARKED) col="$B" ;; SHELL) col="$Rd" ;; esac
+    printf '%-18s %s%-7s%s %-5s %-44s %s\n' "$n" "$col" "$s" "$R" "$age" "${cwd:0:44}" "$sid"
+  done <<<"$names"
+  return 0
+}
+
+cmd_status() {
+  collect
+  local n b=0 i=0 w=0 d=0 p=0 disk col=""
+  local names
+  names="$( { printf '%s\n' "${!WS[@]}"; printf '%s\n' "${!RS[@]}"; } | sed '/^$/d' | sort -u)"
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    case "$(state_of "$n")" in BUSY) b=$((b + 1)) ;; INPUT) i=$((i + 1)) ;; WAIT) w=$((w + 1)) ;; IDLE) d=$((d + 1)) ;; PARKED) p=$((p + 1)) ;; esac
+  done <<<"$names"
+  disk="$(df --output=pcent / | tail -1 | tr -d ' %')"
+  [ "$disk" -ge 90 ] && col="#[fg=red,bold]"
+  printf '#[fg=colour214]●%d #[fg=colour201]?%d #[fg=colour51]*%d #[fg=colour40]○%d #[fg=colour39]⏸%d %s/%s%%#[default]' "$b" "$i" "$w" "$d" "$p" "$col" "$disk"
+}
+
+cmd_close() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "usage: roost close NAME"
+  local wid pcmd
+  wid="$(wid_of "$name")"
+  if [ -n "$wid" ]; then
+    pcmd="$(tm display-message -p -t "$wid" '#{pane_current_command}' 2>/dev/null)"
+    if [ "$pcmd" = claude ]; then
+      tm send-keys -t "$wid" -l '/exit'; tm send-keys -t "$wid" Enter
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
+        [ "$(tm display-message -p -t "$wid" '#{pane_current_command}' 2>/dev/null)" != claude ] && break
+      done
+    fi
+    tm kill-window -t "$wid" 2>/dev/null
+  fi
+  rm -f "$SESS_DIR/$name.json"
+  echo "closed $name"
+}
+
+cmd_click() { # $1 = text of the clicked dash line, $2 = tmux session of the clicking client
+  local n sess="${2:-$TS}" wid
+  n="${1#"${1%%[![:space:]]*}"}"; n="${n%% *}"
+  valid_name "$n" || return 0
+  wid="$(wid_of "$n")"
+  if [ -z "$wid" ] && [ -e "$SESS_DIR/$n.json" ]; then cmd_restore "$n" >/dev/null 2>&1; wid="$(wid_of "$n")"; fi
+  [ -n "$wid" ] && tm select-window -t "$sess:$wid"
+  return 0
+}
+
+cmd_forget() { [ -n "${1:-}" ] || die "usage: roost forget NAME"; rm -f "$SESS_DIR/$1.json"; echo "forgot $1"; }
+
+cmd_adopt() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "usage: roost adopt NAME   (run inside the tmux window where claude is already running)"
+  valid_name "$name" || die "bad NAME"
+  [ -n "${TMUX_PANE:-}" ] || die "run this inside tmux"
+  tm rename-window -t "$TMUX_PANE" "$name"
+  tm set-option -w -q -t "$TMUX_PANE" @roost_managed 1
+  tm set-option -w -q -t "$TMUX_PANE" @roost_name "$name"
+  tm set-option -w -q -t "$TMUX_PANE" @roost_state idle
+  echo "adopted '$name' - the registry entry appears at the next Claude event (send any message)"
+}
+
+cmd_doctor() {
+  local ok="OK  " bad="FAIL"
+  chk() { if eval "$2" >/dev/null 2>&1; then echo "$ok $1"; else echo "$bad $1"; fi; }
+  echo "== roost =="
+  chk "tmux installed ($(tmux -V 2>/dev/null))" "command -v tmux"
+  chk "jq installed" "command -v jq"
+  chk "tmux session '$TS' is running" "tm has-session -t '$TS'"
+  chk "roost-tmux.service enabled+active" "systemctl is-enabled roost-tmux.service && systemctl is-active roost-tmux.service"
+  chk "roost-restore.service enabled" "systemctl is-enabled roost-restore.service"
+  chk "linger enabled for $USER" "[ \"\$(loginctl show-user $USER -p Linger --value)\" = yes ]"
+  chk "hook script executable" "[ -x $HOME/.claude/hooks/roost-hook.sh ]"
+  chk "hooks registered in ~/.claude/settings.json" "jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command|test(\"roost-hook\"))' $HOME/.claude/settings.json"
+  echo "registry entries: $(reg_names | wc -l)  (roost ls)"
+  echo "== recovery (optional, see extras/recovery) =="
+  chk "hardware watchdog device present" "[ -e /dev/watchdog0 ]"
+  if [ -r /sys/class/watchdog/watchdog0/identity ]; then echo "     watchdog: $(cat /sys/class/watchdog/watchdog0/identity) timeout=$(cat /sys/class/watchdog/watchdog0/timeout 2>/dev/null)s timeleft=$(cat /sys/class/watchdog/watchdog0/timeleft 2>/dev/null)s"; fi
+  chk "watchdog armed and fed by systemd (state=active)" "[ \"\$(cat /sys/class/watchdog/watchdog0/state)\" = active ]"
+  chk "kernel.panic=10 (auto reboot after panic)" "[ \"\$(sysctl -n kernel.panic)\" = 10 ]"
+  chk "kernel.hardlockup_panic=1" "[ \"\$(sysctl -n kernel.hardlockup_panic)\" = 1 ]"
+  chk "NVMe APST disabled (kernel cmdline)" "grep -q 'nvme_core.default_ps_max_latency_us=0' /proc/cmdline"
+  echo "     / usage: $(df --output=pcent / | tail -1 | tr -d ' ')   (>90% is risky)"
+}
+
+cmd_help() { sed -n '2,17p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+c="${1:-attach}"
+[ $# -gt 0 ] && shift
+case "$c" in
+  attach|a) cmd_attach "$@" ;;
+  new|n) cmd_new "$@" ;;
+  ls|list|l) cmd_ls "$@" ;;
+  restore|r) cmd_restore "$@" ;;
+  close|c) cmd_close "$@" ;;
+  forget) cmd_forget "$@" ;;
+  adopt) cmd_adopt "$@" ;;
+  click) cmd_click "$@" ;;
+  status) cmd_status "$@" ;;
+  doctor) cmd_doctor "$@" ;;
+  help|-h|--help) cmd_help ;;
+  *) cmd_attach "$c" "$@" ;; # roost vehicle-ros  ==  roost attach vehicle-ros
+esac

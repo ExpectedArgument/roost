@@ -1,0 +1,22 @@
+[Unit]
+Description=tmux server for roost (Claude Code sessions of @USER@)
+Documentation=man:tmux(1)
+After=network-online.target user@@UID@.service
+Wants=network-online.target user@@UID@.service
+
+[Service]
+Type=forking
+User=@USER@
+WorkingDirectory=@HOME@
+Environment=LANG=en_US.UTF-8
+ExecStart=/usr/bin/tmux -u new-session -d -s roost -n dash "exec watch -t -n 5 -c @ROOST_BIN@ ls --color"
+ExecStop=/usr/bin/tmux kill-server
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+# One OOM-killed process (a runaway build) must not take every session down with it.
+OOMPolicy=continue
+ManagedOOMPreference=avoid
+
+[Install]
+WantedBy=multi-user.target

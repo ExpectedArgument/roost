@@ -1,0 +1,12 @@
+[Unit]
+Description=Arm hardware watchdog (iTCO) and hand it to systemd
+After=systemd-modules-load.service local-fs.target
+Before=roost-tmux.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/arm-watchdog
+
+[Install]
+WantedBy=multi-user.target

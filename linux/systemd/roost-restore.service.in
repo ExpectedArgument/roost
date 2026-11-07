@@ -1,0 +1,18 @@
+[Unit]
+Description=Resume Claude Code sessions after boot or tmux restart (roost)
+After=roost-tmux.service network-online.target
+Requires=roost-tmux.service
+PartOf=roost-tmux.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=@USER@
+WorkingDirectory=@HOME@
+Environment=LANG=en_US.UTF-8
+TimeoutStartSec=20min
+ExecStart=@ROOST_BIN@ restore --boot
+
+[Install]
+WantedBy=multi-user.target
