@@ -237,6 +237,11 @@ connection. With Claude Code's Remote Control, the RC column shows which session
 It is a native tmux-compatible multiplexer for Windows, so sessions run in real Windows processes, with no WSL. roost
 works around a few psmux 3.4.0 quirks, documented in [`windows/CLAUDE.md`](windows/CLAUDE.md).
 
+**Pasted text loses letters on Windows (for example every `i` on a Turkish Q keyboard).**
+That is psmux 3.4.0 bug [#884](https://github.com/psmux/psmux/issues/884): a pasted letter that the layout types with
+AltGr arrives as a Tab. It is fixed in psmux after 3.4.0. Until then, `roost` attaches with `PSMUX_VT_INPUT=1` when your
+keyboard layout is affected, which avoids it. `roost doctor` tells you when that applies.
+
 **How do I remove it?**
 `linux/uninstall.sh`, or `pwsh -File windows\uninstall.ps1 [-DryRun]`. Both back up `settings.json` and remove only
 roost's hook entries. Your conversations are never touched.

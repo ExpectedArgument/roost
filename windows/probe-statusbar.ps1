@@ -157,7 +157,7 @@ Mux select-window -t "probe:$active" | Out-Null
 
 # client in a pseudoconsole, with the environment of a normal terminal tab
 $keep = @{}
-foreach ($v in @(Get-ChildItem env: | Where-Object Name -match '^(PSMUX|TMUX|NO_COLOR$)')) { $keep[$v.Name] = $v.Value; Remove-Item "env:$($v.Name)" }
+foreach ($v in @(Get-ChildItem env: | Where-Object { $_.Name -match '^(PSMUX|TMUX|NO_COLOR$)' -and $_.Name -ne 'PSMUX_VT_INPUT' })) { $keep[$v.Name] = $v.Value; Remove-Item "env:$($v.Name)" }   # PSMUX_VT_INPUT is the client's input route: keep it
 $palette = '0c0c0c,c50f1f,13a10e,c19c00,0037da,881798,3a96dd,cccccc,767676,e74856,16c60c,f9f1a5,3b78ff,b4009e,61d6d6,f2f2f2'.Split(',')
 if ($keep['PSMUX_HOST_COLORS']) { foreach ($kv in $keep['PSMUX_HOST_COLORS'].Split(',')) { $k, $v = $kv.Split('=', 2); if ($k -match '^\d+$' -and [int]$k -lt 16) { $palette[[int]$k] = $v } } }
 $E = [char]27

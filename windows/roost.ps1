@@ -554,10 +554,39 @@ function Format-Title($Counts) {
     return $t
 }
 
+# psmux 3.4.0 bug #884 (fixed on psmux master after 3.4.0): on a keyboard layout that types an ASCII letter with AltGr
+# (Turkish Q: i = AltGr+I), the console input route turns every such letter of a paste into a Tab and splits the paste.
+# The client's VT input route (PSMUX_VT_INPUT=1) is not affected; keys, prefix, status bar and pane clicks work the same.
+function Test-Psmux884([string]$VersionText) {
+    if ($VersionText -notmatch 'psmux (\d+)\.(\d+)\.(\d+)') { return $false }
+    return ([version]"$($matches[1]).$($matches[2]).$($matches[3])" -le [version]'3.4.0')
+}
+function Test-AltGrLetters {   # does an installed keyboard layout type an ASCII letter with AltGr (Ctrl+Alt)?
+    try {
+        if (-not ('Roost.Kbd' -as [type])) {
+            Add-Type -Namespace Roost -Name Kbd -MemberDefinition @'
+[DllImport("user32.dll")] public static extern int GetKeyboardLayoutList(int n, IntPtr[] list);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern short VkKeyScanExW(char c, IntPtr hkl);
+'@
+        }
+        $n = [Roost.Kbd]::GetKeyboardLayoutList(0, $null)
+        $list = [IntPtr[]]::new($n); [void][Roost.Kbd]::GetKeyboardLayoutList($n, $list)
+        foreach ($hkl in $list) {
+            foreach ($c in [char[]]'abcdefghijklmnopqrstuvwxyz') {
+                $v = [Roost.Kbd]::VkKeyScanExW($c, $hkl)
+                if ($v -ne -1 -and ((($v -shr 8) -band 6) -eq 6)) { return $true }
+            }
+        }
+    } catch { }
+    return $false
+}
+function Test-PasteWorkaround { return ((Test-Psmux884 ((& psmux -V 2>$null) -join ' ')) -and (Test-AltGrLetters)) }
+
 # attach this terminal to the roost screen; after a detach the tab gets its old title back
 function Invoke-Attach {
     $old = $null
     try { $old = [Console]::Title } catch { }
+    if (-not $env:PSMUX_VT_INPUT -and (Test-PasteWorkaround)) { $env:PSMUX_VT_INPUT = '1' }   # psmux #884, see above
     & psmux attach-session -t $PcSess
     if ($old) { try { [Console]::Title = $old } catch { } }
 }
@@ -958,6 +987,10 @@ function Show-Doctor {
     $startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'roost-restore.cmd'
     if (Test-Path -LiteralPath $startup) { Ok 'restore' 'reopens sessions at sign-in (Startup folder)' } else { Bad 'restore' 'restore-at-logon entry missing (run install.ps1)' }
     if (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\roost\roost.json')) { Info 'terminal' 'Windows Terminal profile "roost" installed' }
+    if (Test-PasteWorkaround) {
+        $how = if ($env:PSMUX_VT_INPUT) { "PSMUX_VT_INPUT=$env:PSMUX_VT_INPUT is set" } else { 'roost attaches with PSMUX_VT_INPUT=1; set it as a user variable for other psmux clients' }
+        Info 'paste' "AltGr keyboard layout + psmux <= 3.4.0: pasted letters like i would turn into Tabs (psmux #884); $how"
+    }
     $rows = @(Get-Rows)
     $open = @($rows | Where-Object State -ne 'parked').Count
     Info 'sessions' "$($rows.Count) registered, $open open, $($rows.Count - $open) parked"
@@ -1110,6 +1143,9 @@ function Invoke-SelfTest {
         & $check 'model names: claude-3-5-sonnet-20241022 -> sonnet 3.5, claude-fable-5-1 -> fable 5.1' (((Format-Model 'claude-3-5-sonnet-20241022') -eq 'sonnet 3.5') -and ((Format-Model 'claude-fable-5-1') -eq 'fable 5.1'))
         $compiled = try { if (-not ('RoostDashInput' -as [type])) { Add-Type -TypeDefinition $DashInputSrc }; $true } catch { $false }
         & $check 'dashboard mouse input compiles' $compiled
+        $kb = Test-AltGrLetters
+        & $check "paste workaround (psmux #884): only psmux <= 3.4.0; keyboard check runs (AltGr letters: $kb)" ((Test-Psmux884 'tmux 3.4.0 psmux 3.4.0 (20aa1d7)') -and
+            -not (Test-Psmux884 'psmux 3.4.1') -and -not (Test-Psmux884 'psmux 3.5.0') -and -not (Test-Psmux884 'nothing') -and ($kb -is [bool]))
         # Remote Control state from Claude Code's per-process files (fake ones for this process, plus a stale one)
         $cs = Join-Path $tmp 'claude\sessions'
         @{ pid = $PID; procStart = $st; sessionId = 'sid-on'; bridgeSessionId = 'session_x' } | ConvertTo-Json | Set-Content (Join-Path $cs 'a.json')

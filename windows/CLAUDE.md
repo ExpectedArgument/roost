@@ -146,6 +146,22 @@ Port-specific notes. Shared design (hook events, state values, lifecycle, invari
 - `ROOST_MOUSE=0` only stops asking for the mouse. Keys still go through the reader, because plain
   `[Console]::ReadKey` would see `ESC [ A` as Esc, `[`, `a`.
 
+## Paste on AltGr keyboard layouts (psmux #884)
+
+- **The bug:** in psmux 3.4.0's console input route, a pasted (or terminal-typed) character that the layout produces
+  with AltGr is read as a Ctrl+Alt chord. On Turkish Q, `i` is AltGr+I, so every `i` reaches the pane as a Tab and
+  splits the bracketed paste.
+- It is fixed on psmux master after 3.4.0, but in no release yet.
+- **The workaround:** the client's VT input route (`PSMUX_VT_INPUT=1`) is not affected.
+  - Measured through a pseudoconsole: the paste arrives intact, and keys, the `Ctrl+B` prefix, status bar clicks and
+    pane mouse clicks behave the same.
+  - Only the attaching client needs it, not the server.
+- `Invoke-Attach` sets it when three conditions hold (`Test-PasteWorkaround`):
+  - psmux ≤ 3.4.0,
+  - an installed layout types an ASCII letter with AltGr (`Test-AltGrLetters`, which uses `VkKeyScanExW`),
+  - `PSMUX_VT_INPUT` is not already set.
+- `doctor` reports it. Other psmux clients need `PSMUX_VT_INPUT=1` as a user variable.
+
 ## PostToolUse (`resume`)
 
 PostToolUse fires after every tool call, and pwsh needs about 0.2 s to start. `install.ps1` therefore registers it
