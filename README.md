@@ -57,7 +57,7 @@ Claude Code hooks knows the state and id of every session, and one command (or t
 | Remote Control column | ✓ | ✓ |
 | Model, effort and advisor columns | ✓ | ✓ |
 | Dashboard | `watch`-style list, click to jump | interactive: click, arrows, keys, wheel |
-| Detects a claude that exited and leaves its window as a plain shell | ✓ `SHELL` | ✓ `✗ exited` |
+| Detects a claude that exited and leaves its window as a plain shell | ✓ `SHELL` | ✓ `× exited` |
 | Self-test, health check, uninstaller | ✓ | ✓ |
 
 ## How it works
@@ -86,7 +86,7 @@ stateDiagram-v2
     state "working ●" as working
     state "needs you ?" as ask
     state "your turn *" as turn
-    state "parked ⏸" as parked
+    state "parked ◌" as parked
     [*] --> quiet: SessionStart
     quiet --> working: UserPromptSubmit
     working --> ask: permission prompt or question
@@ -225,7 +225,7 @@ directory, with its permission mode. Those that were working get the continue pr
 Only the `hooks` section, once, with a backup. Model, effort, advisor, permissions and every other setting are left
 alone. Extra flags you give `roost new` are passed to claude unchanged.
 
-**A session shows `✗ exited` or `SHELL`. What happened?**
+**A session shows `× exited` or `SHELL`. What happened?**
 claude quit, for example after a crash or a Ctrl+C, and its window stayed open as a plain shell. `roost restore NAME`
 resumes it in a fresh window, and so do picking it on the dashboard and `roost NAME`.
 

@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 roost keeps Claude Code sessions alive in a terminal multiplexer, shows each one's state (`●` working, `?` needs a
-decision, `*` your turn, `○` quiet, `⏸` parked) and reopens them with `claude --resume` after a reboot. It is plain
+decision, `*` your turn, `○` quiet, `◌` parked) and reopens them with `claude --resume` after a reboot. It is plain
 shell, with no build step, no dependencies to download, no network and no daemon of its own.
 
 `linux/` (bash, tmux 3.2+, jq) and `windows/` (PowerShell 7, [psmux](https://github.com/psmux/psmux)) are **two
@@ -58,7 +58,7 @@ touch `~/.claude/settings.json` only when a hook is missing, after backing it up
    - Not every event carries `permission_mode`, so both ports keep the last value seen (`auto` before any).
    - Windows also stores `display`. Linux keeps the display state only in the tmux window option `@roost_state`.
 3. The main script (`linux/bin/roost` / `windows/roost.ps1`) reads the registry for `ls`, the dashboard and `restore`.
-   - A window whose claude quit, leaving a plain shell, shows as `SHELL` (Linux) or `✗ exited` (Windows).
+   - A window whose claude quit, leaving a plain shell, shows as `SHELL` (Linux) or `× exited` (Windows).
    - `restore` reopens it, like a parked session.
 
 ### The two state values

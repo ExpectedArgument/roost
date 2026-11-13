@@ -19,9 +19,9 @@
 <text x="715.2" y="62" fill="#00ffff">1</text>
 <text x="740.4" y="62" fill="#00d700">○</text>
 <text x="757.2" y="62" fill="#00d700">1</text>
-<text x="782.4" y="62" fill="#00afff">⏸</text>
+<text x="782.4" y="62" fill="#00afff">◌</text>
 <text x="799.2" y="62" fill="#00afff">1</text>
-<text x="824.4" y="62" fill="#ff0000">✗</text>
+<text x="824.4" y="62" fill="#ff0000">×</text>
 <text x="841.2" y="62" fill="#ff0000">1</text>
 <text x="883.2" y="62" fill="#8a8a8a">22:12</text>
 <text x="18" y="81" fill="#444444">─</text>
@@ -167,7 +167,7 @@
 <text x="538.8" y="138" fill="#cccccc">5.5</text>
 <text x="597.6" y="138" fill="#cccccc">~\src\api</text>
 <text x="43.2" y="157" fill="#00afff">2</text>
-<text x="68.4" y="157" fill="#ff0000">✗</text>
+<text x="68.4" y="157" fill="#ff0000">×</text>
 <text x="85.2" y="157" fill="#ff0000">exited</text>
 <text x="177.6" y="157" fill="#cccccc">bench</text>
 <text x="236.4" y="157" fill="#8a8a8a">2h</text>
@@ -202,7 +202,7 @@
 <text x="538.8" y="195" fill="#cccccc">5.5</text>
 <text x="597.6" y="195" fill="#cccccc">C:\work\infra</text>
 <text x="43.2" y="214" fill="#00afff">5</text>
-<text x="68.4" y="214" fill="#00afff">⏸</text>
+<text x="68.4" y="214" fill="#00afff">◌</text>
 <text x="85.2" y="214" fill="#00afff">parked</text>
 <text x="177.6" y="214" fill="#cccccc">notes</text>
 <text x="236.4" y="214" fill="#8a8a8a">2d</text>
@@ -379,11 +379,11 @@
 <rect x="765.6" y="313" width="17.4" height="19" fill="#262626"/>
 <text x="765.6" y="328" fill="#00d700">1</text>
 <rect x="782.4" y="313" width="9" height="19" fill="#262626"/>
-<text x="782.4" y="328" fill="#00afff">⏸</text>
+<text x="782.4" y="328" fill="#00afff">◌</text>
 <rect x="790.8" y="313" width="17.4" height="19" fill="#262626"/>
 <text x="790.8" y="328" fill="#00afff">1</text>
 <rect x="807.6" y="313" width="9" height="19" fill="#262626"/>
-<text x="807.6" y="328" fill="#ff0000">✗</text>
+<text x="807.6" y="328" fill="#ff0000">×</text>
 <rect x="816" y="313" width="17.4" height="19" fill="#262626"/>
 <text x="816" y="328" fill="#ff0000">1</text>
 <rect x="832.8" y="313" width="109.8" height="19" fill="#262626"/>

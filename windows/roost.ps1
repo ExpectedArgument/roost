@@ -45,9 +45,11 @@ if (-not (Test-Path -LiteralPath $ConnFile)) { Set-Content -LiteralPath $ConnFil
 # No colour when the output is redirected or PowerShell renders plain text (e.g. NO_COLOR is set).
 $E = [char]27
 $UseColor = ($PSStyle.OutputRendering -ne 'PlainText') -and -not [Console]::IsOutputRedirected
-$Dot = [string][char]0x25CF; $Ring = [string][char]0x25CB; $Pause = [string][char]0x23F8
+# State glyphs must exist in Cascadia Mono (Windows Terminal's default font) and Consolas; a missing one is drawn from
+# a fallback font in another size. That is why parked is ◌ (not ⏸ U+23F8) and exited is × (not ✗ U+2717).
+$Dot = [string][char]0x25CF; $Ring = [string][char]0x25CB; $Dotted = [string][char]0x25CC
 $Ell = [string][char]0x2026; $Rule = [string][char]0x2500; $Mark = [string][char]0x203A
-$Tick = [string][char]0x2713; $Cross = [string][char]0x2717; $Mid = [string][char]0x00B7
+$Tick = [string][char]0x2713; $Cross = [string][char]0x00D7; $Mid = [string][char]0x00B7
 $Arrows = [string][char]0x2191 + [char]0x2193
 $Bird = [char]::ConvertFromUtf32(0x1F426)   # terminal tab title and the Windows Terminal profile icon
 $Accent = '38;5;39'; $Dim = '38;5;245'; $Faint = '38;5;238'; $Badge = '1;48;5;39;38;5;16'
@@ -58,7 +60,7 @@ $States = [ordered]@{
     attention = @{ Glyph = '?'; Label = 'decide'; Sgr = '1;38;5;201'; Mux = 'colour201' }
     waiting   = @{ Glyph = '*'; Label = 'your turn'; Sgr = '38;5;51'; Mux = 'colour51' }
     idle      = @{ Glyph = $Ring; Label = 'quiet'; Sgr = '38;5;40'; Mux = 'colour40' }
-    parked    = @{ Glyph = $Pause; Label = 'parked'; Sgr = '38;5;39'; Mux = 'colour39' }
+    parked    = @{ Glyph = $Dotted; Label = 'parked'; Sgr = '38;5;39'; Mux = 'colour39' }
     shell     = @{ Glyph = $Cross; Label = 'exited'; Sgr = '38;5;196'; Mux = 'colour196' }   # claude quit, the window stayed (Linux: SHELL)
 }
 
@@ -449,7 +451,7 @@ function Get-Counts($Rows) {
     return $c
 }
 
-# "● 2  ? 1  * 0  ○ 3  ⏸ 1" (zero counts dimmed; "exited" only when there is one)
+# "● 2  ? 1  * 0  ○ 3  ◌ 1" (zero counts dimmed; "exited" only when there is one)
 function Format-Counts($Counts) {
     $parts = foreach ($k in $Counts.Keys) {
         if ($k -eq 'shell' -and -not $Counts[$k]) { continue }
@@ -591,7 +593,7 @@ function Invoke-Attach {
     if ($old) { try { [Console]::Title = $old } catch { } }
 }
 
-# right side of the status bar: "●2 ?1 *0 ○3 ⏸1 C:61%  14:02", disk in red from 90% (pushed by the dash window when it
+# right side of the status bar: "●2 ?1 *0 ○3 ◌1 C:61%  14:02", disk in red from 90% (pushed by the dash window when it
 # changes; "%%" because psmux runs the status line through strftime)
 function Format-StatusRight($Counts) {
     $parts = foreach ($k in $Counts.Keys) {

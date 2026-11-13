@@ -62,6 +62,13 @@ Port-specific notes. Shared design (hook events, state values, lifecycle, invari
   `^(\S\s)?NAME$`, which is why session names must match `^[A-Za-z0-9._-]+$` (no spaces).
 - The dash also keeps those glyphs in step with the registry (`Sync-WinNames`). Hooks of a session that was moved to a
   background job run outside psmux and cannot rename the window.
+- Every state glyph must exist in Cascadia Mono (Windows Terminal's default font) and in Consolas. A glyph missing from
+  the font is drawn from a fallback font, in another size. That is why parked is `◌`, not `⏸`, and exited is `×`, not
+  `✗`.
+  - Check a candidate glyph with WPF: `[Windows.Media.Typeface]::new('Cascadia Mono').TryGetGlyphTypeface([ref]$g)`,
+    then `$g.CharacterToGlyphMap.ContainsKey(0x25CC)`.
+  - The parked and exited glyphs never appear in a window name. A parked session has no window, and an exited one
+    keeps its bare name. Changing them touches only the dashboard, `ls` and the status-right counts.
 - The status bar mirrors `linux/tmux.conf`: it shows only the dash window, the current window and the busy, attention
   and waiting windows, as `3:api ●`.
   - **psmux 3.4.0 status renderer bug:** a `#{?cond,yes,}` whose false branch is empty, whose true branch has a nested
@@ -94,7 +101,7 @@ Port-specific notes. Shared design (hook events, state values, lifecycle, invari
   - `open`: the window's shell is alive (pid and start time match, so a reused pid does not count) and claude runs in
     it.
   - `exited`: claude quit and the window stayed as a plain shell. `roost-run.ps1` adds `"exited": true` after claude
-    returns. The dashboard shows `✗ exited` (state key `shell`, Linux's SHELL), and `Sync-WinNames` gives the window
+    returns. The dashboard shows `× exited` (state key `shell`, Linux's SHELL), and `Sync-WinNames` gives the window
     its bare name.
   - `none`: no window.
   - `Test-Alive` means `open`, so `restore`, `roost NAME` and a dashboard click reopen both parked and exited sessions.
