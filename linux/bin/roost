@@ -455,7 +455,7 @@ cmd_status() {
   done <<<"$names"
   disk="$(df --output=pcent / | tail -1 | tr -d ' %')"
   [ "$disk" -ge 90 ] && col="#[fg=red,bold]"
-  printf '#[fg=colour214]●%d #[fg=colour201]?%d #[fg=colour51]*%d #[fg=colour40]○%d #[fg=colour39]⏸%d %s/%s%%#[default]' "$b" "$i" "$w" "$d" "$p" "$col" "$disk"
+  printf '#[fg=colour214]●%d #[fg=colour201]?%d #[fg=colour51]*%d #[fg=colour40]○%d #[fg=colour39]◌%d %s/%s%%#[default]' "$b" "$i" "$w" "$d" "$p" "$col" "$disk"
 }
 
 ssh_host() { # $1 = pid of a tmux client: this machine's short host name if that client was started over ssh, else nothing
@@ -704,6 +704,7 @@ cmd_selftest() {
   st_ev demo2 busy; st_ev demo2 idle
   st_ev demo attention '{"notification_type":"permission_prompt"}'
   st_expect "title: one asks, one waits" "🐦 roost  ?1 *1" "$(st_roost title)"
+  st_expect "status: the parked count is drawn with ◌ (a glyph the terminal fonts have), not ⏸" "1 0" "$(st_roost status | grep -c '◌[0-9]') $(st_roost status | grep -c '⏸')"
   st_expect "ls: INPUT" INPUT "$(st_state demo)"
   st_expect "ls: WAIT" WAIT "$(st_state demo2)"
   st_tm select-window -t "$ST_S:dash"

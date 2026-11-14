@@ -4,7 +4,7 @@ Port-specific notes. Shared design (hook events, state values, lifecycle, invari
 
 ## Checking changes
 
-`linux/bin/roost selftest` (about 12 s, 65 checks, exit 1 on any FAIL) runs `new`, the hook cycle, `ls` (RC and model
+`linux/bin/roost selftest` (about 12 s, 70 checks, exit 1 on any FAIL) runs `new`, the hook cycle, `ls` (RC and model
 columns), `title`, `next`, `restore`, `close` and the environment scrub against a throw-away tmux server. It takes the hook from `../hooks` next to the script, so run from the
 repo it tests the repo copies; an installed copy falls back to `~/.claude/hooks`. `roost doctor` checks the installed setup.
 
