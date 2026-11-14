@@ -29,7 +29,8 @@ Claude Code hooks knows the state and id of every session, and one command (or t
 
 - **Know which session needs you.** Every window carries its state, from `●` working to `?` blocked on a decision to
   `*` finished and waiting for your next message. The status bar lists only the sessions that need you, and the terminal
-  tab says `🐦 roost  ?1 *2`. `Ctrl+B a` jumps to the next one: decisions first, then the ones waiting for you.
+  tab says `🐦 roost  ?1 *2`, or `🐦 roost@host  ?1 *2` when you came in over SSH. `Ctrl+B a` jumps to the next one:
+  decisions first, then the ones waiting for you.
 - **Survive closed terminals, dropped connections and reboots.** Close the terminal or drop SSH and the sessions keep running. After a
   reboot or a power cut, roost reopens each one with `claude --resume <id>`. Linux does it from systemd before anyone
   logs in, Windows at sign-in. Sessions interrupted mid-task get a short "continue where you stopped" prompt; idle ones

@@ -12,7 +12,7 @@
 #   roost forget NAME              drop a registry entry only
 #   roost adopt NAME               register the current tmux window (run inside tmux, claude already running)
 #   roost status                   one-line summary for the tmux status bar
-#   roost title                    terminal tab title: "🐦 roost" plus the sessions that wait for you (?1 *2)
+#   roost title [CLIENT_PID]       terminal tab title: "🐦 roost" plus the sessions that wait for you (?1 *2); over ssh "🐦 roost@host"
 #   roost doctor                   health checks (service, hooks, watchdog, sysctl)
 #   roost next                     jump to the next session that waits for you (? first, then *); tmux: Ctrl-b a
 #   roost selftest                 check the scripts in a throw-away tmux server (touches no real session or state)
@@ -458,9 +458,19 @@ cmd_status() {
   printf '#[fg=colour214]●%d #[fg=colour201]?%d #[fg=colour51]*%d #[fg=colour40]○%d #[fg=colour39]⏸%d %s/%s%%#[default]' "$b" "$i" "$w" "$d" "$p" "$col" "$disk"
 }
 
-cmd_title() { # terminal tab title (tmux set-titles-string): "🐦 roost", plus the sessions that wait for you: "🐦 roost  ?1 *2"
+ssh_host() { # $1 = pid of a tmux client: this machine's short host name if that client was started over ssh, else nothing
+  local kv
+  [[ "$1" =~ ^[0-9]+$ ]] || return 0
+  while IFS= read -r -d '' kv; do
+    case "$kv" in SSH_CONNECTION=* | SSH_CLIENT=* | SSH_TTY=*) printf '%s' "${HOSTNAME%%.*}"; return 0 ;; esac
+  done 2>/dev/null < "/proc/$1/environ"
+  return 0
+}
+
+cmd_title() { # terminal tab title (tmux set-titles-string): "🐦 roost", plus the sessions that wait for you: "🐦 roost  ?1 *2". $1 = pid of the tmux client: over ssh the host name follows roost ("🐦 roost@host")
   collect
-  local n i=0 w=0 t="🐦 roost"
+  local n i=0 w=0 t="🐦 roost" h
+  h="$(ssh_host "${1:-}")"; [ -n "$h" ] && t+="@$h"
   local -a parts=()
   while IFS= read -r n; do
     [ -n "$n" ] || continue
@@ -682,6 +692,15 @@ cmd_selftest() {
   st_roost new demo2 >/dev/null 2>&1; st_until st_claude demo2
   st_ev demo2 start
   st_expect "title: busy and idle sessions do not count" "🐦 roost" "$(st_roost title)"
+  # over ssh the title names the host: the client's pid tells (tmux passes #{client_pid}); no ssh variable, no name
+  env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY sleep 30 & ST_C1=$!
+  SSH_CONNECTION="1.2.3.4 5555 6.7.8.9 22" sleep 30 & ST_C2=$!
+  ST_PIDS+=("$ST_C1" "$ST_C2")
+  st_expect "title: a client that is not on ssh gets no host name" "🐦 roost" "$(st_roost title "$ST_C1")"
+  st_expect "title: a client on ssh gets roost@host" "🐦 roost@${HOSTNAME%%.*}" "$(st_roost title "$ST_C2")"
+  st_expect "title: a pid that is gone is plain" "🐦 roost" "$(st_roost title 99999999 2>&1)"
+  st_expect "title: an argument that is no pid is plain" "🐦 roost" "$(st_roost title 'x y' 2>&1)"
+  kill "$ST_C1" "$ST_C2" 2>/dev/null; wait "$ST_C1" "$ST_C2" 2>/dev/null
   st_ev demo2 busy; st_ev demo2 idle
   st_ev demo attention '{"notification_type":"permission_prompt"}'
   st_expect "title: one asks, one waits" "🐦 roost  ?1 *1" "$(st_roost title)"

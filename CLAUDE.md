@@ -86,7 +86,8 @@ kill or a reboot keeps it, so the session is "parked" and comes back with `roost
   - A session handed to a background job has `parkedJobId`, which points to the job's file (`jobId`). The job's process
     holds the connection.
 - The terminal tab title is `🐦 roost`, plus `?N` / `*N` for the sessions that need you or wait for you. Windows pushes
-  it from the dash. Linux has tmux call `roost title` through `set-titles-string`.
+  it from the dash. Linux has tmux call `roost title` through `set-titles-string`. Linux adds `@host` (this machine's
+  short host name) when the attached client came in over ssh, so tabs of several machines can be told apart.
 
 ### Model, effort and advisor columns (both ports)
 

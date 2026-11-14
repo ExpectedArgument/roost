@@ -50,8 +50,13 @@ The shared rules are in the root `CLAUDE.md`. Linux specifics:
 - `rc_index` fills `RCI` (session id → `on`/`off`) for `ls`. The pid is also the file name, so stale files are skipped
   before `jq` parses them. `proc_start` reads field 22 of `/proc/PID/stat` after cutting everything up to the last `) `,
   because the command name may contain spaces and parentheses.
-- `roost title` prints the tab title. `tmux.conf` sets `set-titles on` and `set-titles-string '#(roost title)'`, so the
-  title refreshes with the status bar. The first expansion after an attach is empty for a moment, until the job has run.
+- `roost title` prints the tab title. `tmux.conf` sets `set-titles on` and `set-titles-string '#(roost title #{client_pid})'`,
+  so the title refreshes with the status bar. The first expansion after an attach is empty for a moment, until the job
+  has run.
+- Over ssh the title is `🐦 roost@host`. `ssh_host` reads `/proc/<client pid>/environ` (pure bash, no fork) and looks for
+  `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`. The tmux client keeps the environment of the ssh login, while the server's
+  job does not. `#{client_pid}` is part of the job's command, so each client gets its own job and its own title. The
+  name is `${HOSTNAME%%.*}`: the server cannot know the alias the client typed in its ssh config.
 
 ## `ls` columns: model, effort, advisor
 
